@@ -7,9 +7,9 @@ workers_dev = true
 binding = "FEEDS"
 bucket_name = "lighom-feeds"
 
-# Bind feed.lighom.com to this Worker. The zone `lighom.com` must be on this
-# Cloudflare account; the subdomain will be created on first deploy.
-[[routes]]
-pattern = "feed.lighom.com/*"
-zone_name = "lighom.com"
-custom_domain = true
+# To bind feed.lighom.com later (after adding lighom.com as a Cloudflare zone),
+# uncomment the block below and re-run `wrangler deploy`.
+# [[routes]]
+# pattern = "feed.lighom.com/*"
+# zone_name = "lighom.com"
+# custom_domain = true

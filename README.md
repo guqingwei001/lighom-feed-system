@@ -1,7 +1,7 @@
 # Lighom Meta Catalog Feed — Automation
 
 Generates Lighom's Meta product catalog every 4 hours and serves it on
-`https://feed.lighom.com/meta.xml`.
+`https://lighom-feed-server.dikecarmem750.workers.dev/meta.xml`.
 
 ```
 GitHub Actions (cron 0 */4 * * *)
@@ -16,7 +16,7 @@ GitHub Actions (cron 0 */4 * * *)
    Cloudflare R2 bucket  lighom-feeds
         │
         ▼  fetch
-   Cloudflare Worker  feed.lighom.com
+   Cloudflare Worker  lighom-feed-server.dikecarmem750.workers.dev
         │
         ▼  GET /meta.xml
    Meta Commerce Manager  scheduled feed source
@@ -64,9 +64,9 @@ non-zero, surfacing as a red ✗ on the GitHub Actions page.
 
 ## URLs
 
-- Feed: `https://feed.lighom.com/meta.xml`
-- Health: `https://feed.lighom.com/health` (JSON)
-- Status: `https://feed.lighom.com/status` (HTML, last 24 cron runs)
+- Feed: `https://lighom-feed-server.dikecarmem750.workers.dev/meta.xml`
+- Health: `https://lighom-feed-server.dikecarmem750.workers.dev/health` (JSON)
+- Status: `https://lighom-feed-server.dikecarmem750.workers.dev/status` (HTML, last 24 cron runs)
 - Logs: each run uploads `r2://lighom-feeds/logs/YYYY/MM/DDTHHMMSS.json`
 
 See [DEPLOY.md](DEPLOY.md) for setup steps.

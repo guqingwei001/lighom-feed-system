@@ -42,15 +42,15 @@ Add **6 repository secrets** (Settings → Secrets and variables → Actions):
 cd server
 npm install
 npx wrangler login         # opens browser, sign in
-npx wrangler deploy        # creates the Worker + binds R2 + binds feed.lighom.com
+npx wrangler deploy        # creates the Worker + binds R2 + binds lighom-feed-server.dikecarmem750.workers.dev
 ```
 
-`wrangler deploy` will prompt to add the DNS record for `feed.lighom.com`
+`wrangler deploy` will prompt to add the DNS record for `lighom-feed-server.dikecarmem750.workers.dev`
 the first time. Accept it.
 
 Verify:
 ```bash
-curl https://feed.lighom.com/health
+curl https://lighom-feed-server.dikecarmem750.workers.dev/health
 # Expect:  {"status":"no_feed"}    (no feed in R2 yet — that's fine)
 ```
 
@@ -62,7 +62,7 @@ Runtime: ~90 min for full Shopline pull. Watch live logs.
 
 When green, verify:
 ```bash
-curl -s https://feed.lighom.com/health | jq
+curl -s https://lighom-feed-server.dikecarmem750.workers.dev/health | jq
 # {
 #   "status": "ok",
 #   "age_hours": 0.05,
@@ -72,11 +72,11 @@ curl -s https://feed.lighom.com/health | jq
 #   "healthy": true
 # }
 
-curl -I https://feed.lighom.com/meta.xml
+curl -I https://lighom-feed-server.dikecarmem750.workers.dev/meta.xml
 # 200, Content-Type: application/xml; charset=utf-8
 
 # uniqueness check
-curl -s https://feed.lighom.com/meta.xml \
+curl -s https://lighom-feed-server.dikecarmem750.workers.dev/meta.xml \
   | grep -oE '<g:id>[^<]+</g:id>' | sort | uniq -c | awk '$1>1'
 # Expect empty output (no duplicates)
 ```
@@ -90,7 +90,7 @@ Scheduled feed**.
 
 | Field | Value |
 |---|---|
-| URL | `https://feed.lighom.com/meta.xml` |
+| URL | `https://lighom-feed-server.dikecarmem750.workers.dev/meta.xml` |
 | Schedule | Hourly |
 | Update behavior | **Update only** (preserves learning data on existing IDs) |
 | Currency | USD |
@@ -106,8 +106,8 @@ file. To run on demand: GitHub → Actions → Run workflow.
 
 ## Monitoring
 
-- Daily glance: `curl https://feed.lighom.com/health`
-- Weekly: open `https://feed.lighom.com/status` (last 24 runs table)
+- Daily glance: `curl https://lighom-feed-server.dikecarmem750.workers.dev/health`
+- Weekly: open `https://lighom-feed-server.dikecarmem750.workers.dev/status` (last 24 runs table)
 - Meta side: Commerce Manager → Catalog → Diagnostics
 
 ## Troubleshooting
@@ -126,7 +126,7 @@ file. To run on demand: GitHub → Actions → Run workflow.
 - Inspect Actions log for which IDs collided; usually a Shopline data issue.
 
 ### Meta says "feed cannot be fetched"
-- Check Worker is reachable: `curl -I https://feed.lighom.com/meta.xml`
+- Check Worker is reachable: `curl -I https://lighom-feed-server.dikecarmem750.workers.dev/meta.xml`
 - If 503: feed not uploaded yet — check Actions.
 - If 200 but Meta still complains: check `Content-Type` is `application/xml`.
 

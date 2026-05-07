@@ -59,12 +59,20 @@ def build_pinterest_xml(items: list[dict], *, store_url: str = 'https://lighom.c
         for u in it.get('additional_image_links', []):
             out.append(f'      <g:additional_image_link>{escape(u)}</g:additional_image_link>\n')
 
+        # P1: Pinterest mobile link (same value as link, helps mobile UX)
+        out.append(f'      <g:mobile_link>{escape(link)}</g:mobile_link>\n')
+        # Lifestyle image — non-white-bg / contextual shot, fallback = 2nd product image
+        if it.get('lifestyle_image_link'):
+            out.append(f'      <g:lifestyle_image_link>{escape(it["lifestyle_image_link"])}</g:lifestyle_image_link>\n')
+
         out.append(f'      <g:availability>{it["availability"]}</g:availability>\n')
         out.append(f'      <g:condition>{it["condition"]}</g:condition>\n')
         out.append(f'      <g:price>{it["price"]}</g:price>\n')
         if it.get('sale_price'):
             out.append(f'      <g:sale_price>{it["sale_price"]}</g:sale_price>\n')
         out.append(f'      <g:brand>{escape(it["brand"])}</g:brand>\n')
+        # P0: identifier_exists=no — Lighom branded products without GTIN
+        out.append(f'      <g:identifier_exists>no</g:identifier_exists>\n')
         if it.get('mpn'):
             out.append(f'      <g:mpn>{escape(it["mpn"])}</g:mpn>\n')
         if it.get('gtin'):
@@ -78,6 +86,17 @@ def build_pinterest_xml(items: list[dict], *, store_url: str = 'https://lighom.c
             v = it.get(fld)
             if v:
                 out.append(f'      <g:{fld}>{_cdata(v)}</g:{fld}>\n')
+
+        # P0: age_group + gender — homewares default
+        out.append(f'      <g:age_group>{it.get("age_group","adult")}</g:age_group>\n')
+        out.append(f'      <g:gender>{it.get("gender","unisex")}</g:gender>\n')
+        # P1: explicit non-adult content flag
+        out.append('      <g:adult>false</g:adult>\n')
+        # P2: furniture-only size_type / size_system
+        product_type = (it.get('product_type') or '').lower()
+        if product_type.startswith('furniture'):
+            out.append('      <g:size_type>regular</g:size_type>\n')
+            out.append('      <g:size_system>US</g:size_system>\n')
 
         if it.get('shipping_weight'):
             out.append(f'      <g:shipping_weight>{it["shipping_weight"]}</g:shipping_weight>\n')

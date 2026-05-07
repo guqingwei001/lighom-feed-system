@@ -53,6 +53,10 @@ def build_meta_xml(items: list[dict], *, store_url: str = 'https://lighom.com') 
             out.append(f'      <g:gtin>{escape(it["gtin"])}</g:gtin>\n')
 
         out.append(f'      <g:google_product_category>{escape(it["google_product_category"])}</g:google_product_category>\n')
+        if it.get('fb_product_category'):
+            out.append(f'      <g:fb_product_category>{escape(it["fb_product_category"])}</g:fb_product_category>\n')
+        if it.get('language'):
+            out.append(f'      <g:language>{escape(it["language"])}</g:language>\n')
         if it.get('product_type'):
             out.append(f'      <g:product_type>{_cdata(it["product_type"])}</g:product_type>\n')
 
@@ -82,6 +86,12 @@ def build_meta_xml(items: list[dict], *, store_url: str = 'https://lighom.com') 
 
         for h in it.get('product_highlights', []):
             out.append(f'      <g:product_highlight>{_cdata(h)}</g:product_highlight>\n')
+
+        for label, value in it.get('additional_variant_attributes', []):
+            out.append('      <g:additional_variant_attribute>\n')
+            out.append(f'        <g:label>{escape(label)}</g:label>\n')
+            out.append(f'        <g:value>{_cdata(value)}</g:value>\n')
+            out.append('      </g:additional_variant_attribute>\n')
 
         for i, val in enumerate(it.get('custom_labels', [])):
             if val:

@@ -15,6 +15,7 @@ from description_parser import (
     norm_color, fmt_weight, parse_weight_to_kg,
 )
 from gpc_map import gpc
+from fb_category_map import fb_product_category
 
 STORE = 'https://lighom.com'
 SHIPPING_COUNTRIES = ('US', 'CA', 'GB', 'AU', 'DE', 'FR')
@@ -62,6 +63,14 @@ def process_product(product: dict, custom_cat: str = '') -> list[dict]:
     tags = product.get('tags') or ''
     tag_attrs, _ = parse_tags(tags)
     gpc_path, gpc_id = gpc(custom_cat)
+    fb_cat_id = fb_product_category(custom_cat)
+
+    # Option names already covered by g:color/g:size/g:material/g:pattern.
+    # Anything else becomes additional_variant_attribute (per Meta spec).
+    STANDARD_OPTS = {'color', 'finish', 'lamp color', 'size', 'dimensions',
+                     'diameter', 'length', 'material', 'pattern', 'shape'}
+    extra_option_names = [(i, o.get('name')) for i, o in enumerate(options[:5])
+                          if o.get('name') and o['name'].strip().lower() not in STANDARD_OPTS]
 
     title_p = (product.get('title') or '').strip()
     body = product.get('body_html') or ''
@@ -191,6 +200,8 @@ def process_product(product: dict, custom_cat: str = '') -> list[dict]:
             'gtin': gtin,
             'google_product_category': gpc_path,
             'google_product_category_id': str(gpc_id),
+            'fb_product_category': str(fb_cat_id) if fb_cat_id else '',
+            'language': 'en',
             'product_type': custom_cat or '',
             'color': color,
             'size': size,
@@ -204,6 +215,11 @@ def process_product(product: dict, custom_cat: str = '') -> list[dict]:
             'product_details': build_product_detail(spec, custom_cat, color, material),
             'product_highlights': highlights,
             'custom_labels': custom_labels,
+            'additional_variant_attributes': [
+                (name, str(v.get(f'option{idx+1}')).strip())
+                for (idx, name) in extra_option_names
+                if v.get(f'option{idx+1}')
+            ],
         })
     return items
 

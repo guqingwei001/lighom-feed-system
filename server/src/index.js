@@ -1,14 +1,19 @@
 /**
  * Lighom Catalog Feed Server.
  * Serves feed XML files from a private R2 bucket, gated by FEED_ACCESS_TOKEN.
+ * Also relays Shopline order/created webhooks to Meta CAPI (see capi.js).
  *
  * Endpoints:
- *   GET /meta.xml?key=…       → meta-feed.xml      (token-gated)
- *   GET /pinterest.xml?key=…  → pinterest-feed.xml (token-gated)
- *   GET /google.xml?key=…     → google-feed.xml    (token-gated)
- *   GET /health               → JSON health (open — for monitoring)
- *   GET /status               → HTML dashboard (open — for monitoring)
+ *   GET  /meta.xml?key=…       → meta-feed.xml      (token-gated)
+ *   GET  /pinterest.xml?key=…  → pinterest-feed.xml (token-gated)
+ *   GET  /google.xml?key=…     → google-feed.xml    (token-gated)
+ *   GET  /health               → JSON health (open — for monitoring)
+ *   GET  /status               → HTML dashboard (open — for monitoring)
+ *   POST /capi/order           → Shopline order webhook → Meta CAPI
+ *   GET  /capi/health?key=…    → CAPI relay self-check (token-gated)
  */
+
+import { handleCapi } from './capi.js';
 
 const FEED_ROUTES = {
   '/meta.xml':      'meta-feed.xml',
@@ -23,6 +28,7 @@ export default {
 
     if (pathname === '/health') return health(env);
     if (pathname === '/status') return status(env);
+    if (pathname.startsWith('/capi/')) return handleCapi(request, env, url);
 
     const fileName = FEED_ROUTES[pathname];
     if (!fileName) return new Response('Not Found', { status: 404 });

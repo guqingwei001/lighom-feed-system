@@ -1,0 +1,15 @@
+name = "lighom-feed-server"
+main = "src/index.js"
+compatibility_date = "2026-05-01"
+workers_dev = true
+
+[[r2_buckets]]
+binding = "FEEDS"
+bucket_name = "lighom-feeds"
+
+# Bind feed.lighom.com to this Worker. The zone `lighom.com` must be on this
+# Cloudflare account; the subdomain will be created on first deploy.
+[[routes]]
+pattern = "feed.lighom.com/*"
+zone_name = "lighom.com"
+custom_domain = true

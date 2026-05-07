@@ -1,0 +1,18 @@
+# Local artifacts
+*.xml
+*.jsonl
+*.tsv
+__pycache__/
+*.pyc
+.DS_Store
+*.bak*
+
+# CF Worker
+server/node_modules/
+server/.wrangler/
+server/.dev.vars
+
+# IDE
+.vscode/
+.idea/
+*.local

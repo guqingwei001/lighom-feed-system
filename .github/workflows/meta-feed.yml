@@ -1,0 +1,46 @@
+name: Generate Meta Feed
+
+on:
+  # Every 4 hours, on the hour. Adjust if needed; full Shopline pull
+  # for ~15K SKUs takes ~90 min, so 4-hour spacing is safe.
+  schedule:
+    - cron: '0 */4 * * *'
+  workflow_dispatch:
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Generate Meta Feed
+        env:
+          SHOPLINE_API_TOKEN:    ${{ secrets.SHOPLINE_API_TOKEN }}
+          SHOPLINE_DOMAIN:       ${{ secrets.SHOPLINE_DOMAIN }}
+          R2_ACCESS_KEY_ID:      ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY:  ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT:           ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET:             ${{ secrets.R2_BUCKET }}
+          PYTHONUNBUFFERED:      "1"
+        working-directory: meta-feed
+        run: python generate.py
+
+      - name: Upload feed as artifact (last-resort fallback)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: meta-feed-failed
+          path: |
+            /tmp/meta-feed.xml
+            /tmp/smart-feed.xml
+          if-no-files-found: ignore
+          retention-days: 7

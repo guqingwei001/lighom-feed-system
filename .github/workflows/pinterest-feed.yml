@@ -1,0 +1,37 @@
+name: Generate Pinterest Feed
+
+on:
+  # Offset 30 min from Meta (which runs at 0 */4) so we don't hammer Shopline
+  # API in parallel. Pinterest fetches half-past hours: 30, 4:30, 8:30, ...
+  schedule:
+    - cron: '30 */4 * * *'
+  workflow_dispatch:
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Generate Pinterest Feed
+        env:
+          SHOPLINE_API_TOKEN:    ${{ secrets.SHOPLINE_API_TOKEN }}
+          SHOPLINE_DOMAIN:       ${{ secrets.SHOPLINE_DOMAIN }}
+          R2_ACCESS_KEY_ID:      ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY:  ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT:           ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET:             ${{ secrets.R2_BUCKET }}
+          PYTHONUNBUFFERED:      "1"
+        working-directory: meta-feed
+        run: python generate_pinterest.py

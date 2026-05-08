@@ -37,6 +37,7 @@
 import { insertRow as bqInsertRow } from './bigquery.js';
 import { pinterestSend } from './pinterest.js';
 import { ga4mpSend } from './ga4mp.js';
+import { handleEvent } from './events.js';
 
 const META_API_VERSION_DEFAULT = 'v21.0';
 const BQ_DATASET_DEFAULT = 'lighom_capi';
@@ -46,6 +47,9 @@ const BQ_TABLE_DEFAULT = 'orders';
 export async function handleCapi(request, env, url) {
   if (url.pathname === '/capi/order' && request.method === 'POST') {
     return handleOrderWebhook(request, env);
+  }
+  if (url.pathname === '/capi/event') {
+    return handleEvent(request, env);
   }
   if (url.pathname === '/capi/health') {
     return capiHealth(request, env, url);

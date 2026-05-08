@@ -54,7 +54,8 @@ def build_pinterest_xml(items: list[dict], *, store_url: str = 'https://lighom.c
         out.append(f'      <g:description>{_cdata(it["description"])}</g:description>\n')
         link = _retarget_link(it["link"])
         out.append(f'      <g:link>{escape(link)}</g:link>\n')
-        out.append(f'      <g:ad_link>{escape(link)}</g:ad_link>\n')
+        # Don't emit ad_link — when identical to link Pinterest flags it (warning 192).
+        # Pinterest defaults to using <g:link> for ad clicks if ad_link is absent.
         out.append(f'      <g:image_link>{escape(it["image_link"])}</g:image_link>\n')
         for u in it.get('additional_image_links', []):
             out.append(f'      <g:additional_image_link>{escape(u)}</g:additional_image_link>\n')

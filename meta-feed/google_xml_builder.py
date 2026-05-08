@@ -111,19 +111,20 @@ def build_google_xml(items: list[dict], *, store_url: str = 'https://lighom.com'
         # Shipping label (groups SKUs in GMC shipping rules)
         out.append('      <g:shipping_label>free_shipping_global</g:shipping_label>\n')
 
+        # Per Google spec: sub-elements of <g:shipping> and <g:tax> use the
+        # default namespace (NO `g:` prefix on the children).
         for cc in it.get('shipping_countries', []):
             out.append('      <g:shipping>\n')
-            out.append(f'        <g:country>{cc}</g:country>\n')
-            out.append('        <g:service>Standard</g:service>\n')
-            out.append('        <g:price>0 USD</g:price>\n')
+            out.append(f'        <country>{cc}</country>\n')
+            out.append('        <service>Standard</service>\n')
+            out.append('        <price>0 USD</price>\n')
             out.append('      </g:shipping>\n')
 
         # US tax: Lighom price already includes tax → rate=0, tax_ship=n
-        # Other countries: omit (let Google merchant settings handle)
         out.append('      <g:tax>\n')
-        out.append('        <g:country>US</g:country>\n')
-        out.append('        <g:rate>0</g:rate>\n')
-        out.append('        <g:tax_ship>n</g:tax_ship>\n')
+        out.append('        <country>US</country>\n')
+        out.append('        <rate>0</rate>\n')
+        out.append('        <tax_ship>n</tax_ship>\n')
         out.append('      </g:tax>\n')
 
         # Google supports product_detail / product_highlight

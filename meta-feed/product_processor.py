@@ -14,8 +14,9 @@ from description_parser import (
     build_product_detail, short_description, clean_title,
     norm_color, fmt_weight, parse_weight_to_kg,
 )
-from gpc_map import gpc
+from gpc_map import gpc as _legacy_gpc  # kept for back-compat, not used now
 from fb_category_map import fb_product_category
+from google_category_map import google_category
 
 STORE = 'https://lighom.com'
 SHIPPING_COUNTRIES = ('US', 'CA', 'GB', 'AU', 'DE', 'FR')
@@ -62,7 +63,9 @@ def process_product(product: dict, custom_cat: str = '') -> list[dict]:
     options = product.get('options') or []
     tags = product.get('tags') or ''
     tag_attrs, _ = parse_tags(tags)
-    gpc_path, gpc_id = gpc(custom_cat)
+    # Authoritative source: google_category_map (built from Google taxonomy 2021-09-21,
+    # paths verified against actual leaf names; deeper than legacy gpc_map).
+    gpc_id, gpc_path, _conf = google_category(custom_cat)
     fb_cat_id = fb_product_category(custom_cat)
 
     # Option names already covered by g:color/g:size/g:material/g:pattern.

@@ -14,7 +14,7 @@
  *   - access_token never exposed to browser
  *
  * Endpoints:
- *   POST /capi/order                   ← Shopline webhook receiver
+ *   POST /capi/order                   ← Shopline webhook receiver (dual-writes: Meta + BigQuery)
  *   GET  /capi/health?key=<feed_token> ← debug
  *
  * Required wrangler secrets (set via `wrangler secret put`):
@@ -25,9 +25,20 @@
  * Optional:
  *   META_API_VERSION                   default "v21.0"
  *   META_TEST_EVENT_CODE               TESTxxxxx — for Events Manager test mode
+ *   GCP_SA_JSON                        Service Account JSON (enables BigQuery dual-write)
+ *   GCP_PROJECT_ID                     e.g. "lighom-analytics"
+ *   BQ_DATASET                         default "lighom_capi"
+ *   BQ_TABLE                           default "orders"
+ *
+ * BigQuery dual-write is fail-safe: if GCP_SA_JSON missing OR insert fails,
+ * the Meta CAPI call is unaffected (Promise.allSettled).
  */
 
+import { insertRow as bqInsertRow } from './bigquery.js';
+
 const META_API_VERSION_DEFAULT = 'v21.0';
+const BQ_DATASET_DEFAULT = 'lighom_capi';
+const BQ_TABLE_DEFAULT = 'orders';
 
 // Entry — invoked from src/index.js routing
 export async function handleCapi(request, env, url) {
@@ -67,39 +78,98 @@ async function handleOrderWebhook(request, env) {
   }
 
   const event = await buildMetaEvent(o, request);
+  const bqRow = buildBqRow(o, event);
+
   const apiVersion = env.META_API_VERSION || META_API_VERSION_DEFAULT;
   const endpoint = `https://graph.facebook.com/${apiVersion}/${env.META_PIXEL_ID}/events`;
-
   const payload = { data: [event] };
   if (env.META_TEST_EVENT_CODE) payload.test_event_code = env.META_TEST_EVENT_CODE;
 
-  let metaResp;
+  // Dual-write: Meta CAPI + BigQuery in parallel. BQ failure NEVER affects Meta.
+  const [metaSettled, bqSettled] = await Promise.allSettled([
+    metaSend(endpoint, env.META_CAPI_ACCESS_TOKEN, payload),
+    env.GCP_SA_JSON
+      ? bqInsertRow(env, env.BQ_DATASET || BQ_DATASET_DEFAULT, env.BQ_TABLE || BQ_TABLE_DEFAULT, bqRow, event.event_id)
+      : Promise.resolve({ ok: false, skipped: true, reason: 'GCP_SA_JSON not set' }),
+  ]);
+
+  const meta = metaSettled.status === 'fulfilled'
+    ? metaSettled.value
+    : { ok: false, error: String(metaSettled.reason).slice(0, 300) };
+  const bq = bqSettled.status === 'fulfilled'
+    ? bqSettled.value
+    : { ok: false, error: String(bqSettled.reason).slice(0, 300) };
+
+  // Always 200 to Shopline so it doesn't retry storms.
+  return jsonResp(200, {
+    ok: meta.ok,                    // Shopline-visible status reflects Meta only (BQ is best-effort log)
+    meta,
+    bigquery: bq,
+    event_id: event.event_id,
+    matched_keys: Object.keys(event.user_data || {}).filter(k => event.user_data[k]),
+  });
+}
+
+async function metaSend(endpoint, token, payload) {
+  let r;
   try {
-    metaResp = await fetch(endpoint, {
+    r = await fetch(endpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${env.META_CAPI_ACCESS_TOKEN}`,
+        'Authorization': `Bearer ${token}`,
       },
       body: JSON.stringify(payload),
     });
   } catch (err) {
-    return jsonResp(502, { ok: false, error: 'meta_fetch_failed', detail: String(err) });
+    return { ok: false, error: 'meta_fetch_failed', detail: String(err).slice(0, 300) };
   }
+  const txt = await r.text();
+  let body = null;
+  try { body = JSON.parse(txt); } catch {}
+  return { ok: r.ok, status: r.status, response: body || txt.slice(0, 500) };
+}
 
-  const respText = await metaResp.text();
-  let respJson = null;
-  try { respJson = JSON.parse(respText); } catch {}
+// Build BigQuery row matching the schema in DEPLOY.md Phase 9.
+// Uses already-computed Meta event for hash reuse where possible.
+function buildBqRow(order, metaEvent) {
+  const noteAttrs = arrayToMap(order.note_attributes || order.noteAttributes || []);
+  const customer = order.customer || {};
+  const shippingAddr = order.shipping_address || order.shippingAddress || customer.default_address || {};
 
-  // Always 200 to Shopline so it doesn't retry storms
-  // (Meta-side errors logged to response body for debugging — not visible to Shopline)
-  return jsonResp(200, {
-    ok: metaResp.ok,
-    meta_status: metaResp.status,
-    meta_response: respJson || respText.slice(0, 500),
-    event_id: event.event_id,
-    matched_keys: Object.keys(event.user_data || {}).filter(k => event.user_data[k]),
-  });
+  const ud = metaEvent.user_data || {};
+  const cd = metaEvent.custom_data || {};
+
+  // Hashed pulls from Meta event (single source of truth, already SHA-256'd).
+  const arr0 = (v) => Array.isArray(v) && v.length ? v[0] : null;
+
+  return {
+    event_id: metaEvent.event_id,
+    event_time: new Date(metaEvent.event_time * 1000).toISOString(),
+    event_name: metaEvent.event_name,
+    order_id: String(order.id || order.order_id || ''),
+    user_id: String(customer.id || customer.user_id || order.user_id || ''),
+    email_hashed: arr0(ud.em),
+    phone_hashed: arr0(ud.ph),
+    fbc: ud.fbc || null,
+    fbp: ud.fbp || null,
+    client_ip: ud.client_ip_address || null,
+    client_ua: ud.client_user_agent || null,
+    value: typeof cd.value === 'number' ? cd.value : null,
+    currency: cd.currency || null,
+    product_ids: Array.isArray(cd.content_ids) ? cd.content_ids : [],
+    utm_source: noteAttrs._last_utm_source || noteAttrs.utm_source || noteAttrs._first_utm_source || null,
+    utm_medium: noteAttrs._last_utm_medium || noteAttrs.utm_medium || noteAttrs._first_utm_medium || null,
+    utm_campaign: noteAttrs._last_utm_campaign || noteAttrs.utm_campaign || noteAttrs._first_utm_campaign || null,
+    country: arr0(ud.country),
+    city_hashed: arr0(ud.ct),
+    // meta_capi_status / meta_capi_response are 'pending' because we write to
+    // BQ in parallel with the Meta call (don't have result yet). To capture
+    // actual Meta status, switch to sequential write — accepted trade-off per
+    // user spec "Meta CAPI + BigQuery 并行".
+    meta_capi_status: 'pending',
+    meta_capi_response: null,
+  };
 }
 
 async function capiHealth(request, env, url) {
@@ -114,6 +184,10 @@ async function capiHealth(request, env, url) {
     has_webhook_secret: !!env.SHOPLINE_WEBHOOK_SECRET,
     api_version: env.META_API_VERSION || META_API_VERSION_DEFAULT,
     test_event_code_set: !!env.META_TEST_EVENT_CODE,
+    bigquery_enabled: !!env.GCP_SA_JSON,
+    bq_project: env.GCP_PROJECT_ID || null,
+    bq_dataset: env.BQ_DATASET || BQ_DATASET_DEFAULT,
+    bq_table: env.BQ_TABLE || BQ_TABLE_DEFAULT,
   });
 }
 

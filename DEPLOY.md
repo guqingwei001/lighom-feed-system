@@ -201,6 +201,111 @@ custom code blocks are deployed in Shopline admin (Apps → Custom Code):
 
 If any are missing, EMQ will plateau at 6-7.
 
+## Phase 9 — BigQuery dual-write (optional, Worker streams every order to BQ)
+
+`/capi/order` writes each order in parallel to (1) Meta CAPI (existing) and
+(2) a BigQuery `lighom_capi.orders` table — for permanent record, ad-hoc SQL,
+historical analysis, and Looker dashboards.
+
+Failure isolation: BQ insert failures do **not** affect Meta delivery
+(Promise.allSettled). If `GCP_SA_JSON` secret is unset, BQ write is skipped
+silently and only Meta fires.
+
+### 9.1 Create GCP project + Service Account
+
+1. https://console.cloud.google.com — create project `lighom-analytics`
+2. APIs & Services → Library → enable **BigQuery API**
+3. IAM → Service Accounts → Create:
+   - Name: `lighom-worker-bq`
+   - Roles: **BigQuery Data Editor** + **BigQuery Job User**
+4. Keys → Add Key → JSON → download (keep this file SECRET, never commit)
+
+### 9.2 Create dataset + table
+
+In BigQuery Console for project `lighom-analytics`:
+
+```sql
+CREATE SCHEMA `lighom-analytics.lighom_capi`
+  OPTIONS(location='US');
+
+CREATE TABLE `lighom-analytics.lighom_capi.orders` (
+  event_id STRING NOT NULL,
+  event_time TIMESTAMP NOT NULL,
+  event_name STRING NOT NULL,
+  order_id STRING,
+  user_id STRING,
+  email_hashed STRING,
+  phone_hashed STRING,
+  fbc STRING,
+  fbp STRING,
+  client_ip STRING,
+  client_ua STRING,
+  value FLOAT64,
+  currency STRING,
+  product_ids ARRAY<STRING>,
+  utm_source STRING,
+  utm_medium STRING,
+  utm_campaign STRING,
+  country STRING,
+  city_hashed STRING,
+  meta_capi_status STRING,
+  meta_capi_response STRING
+)
+PARTITION BY DATE(event_time)
+CLUSTER BY event_name, country;
+```
+
+### 9.3 Set Worker secrets
+
+```bash
+cd server
+# Paste full SA JSON file content (multi-line — wrangler accepts via stdin)
+cat /path/to/lighom-worker-bq-XXXXX.json | npx wrangler secret put GCP_SA_JSON
+
+echo "lighom-analytics" | npx wrangler secret put GCP_PROJECT_ID
+
+# Optional dataset / table override
+# echo "lighom_capi" | npx wrangler secret put BQ_DATASET
+# echo "orders"      | npx wrangler secret put BQ_TABLE
+
+npx wrangler deploy
+```
+
+Verify:
+```bash
+curl "https://lighom-feed-server.dikecarmem750.workers.dev/capi/health?key=$FEED_TOKEN"
+# expect: bigquery_enabled: true, bq_project: "lighom-analytics", ...
+```
+
+### 9.4 Test with a real order
+
+```bash
+# Worker live tail
+cd server && npx wrangler tail
+# Then place a test order on lighom.com.
+# Tail should show: "ok": true, "bigquery": {"ok": true}
+```
+
+```sql
+-- BigQuery
+SELECT *
+FROM `lighom-analytics.lighom_capi.orders`
+ORDER BY event_time DESC
+LIMIT 10;
+```
+
+### 9.5 Trade-offs / known limits
+
+- `meta_capi_status` is always `'pending'` because BQ insert runs in parallel
+  with Meta call (we don't yet know Meta result at insert time). To capture
+  actual Meta result in BQ, switch to sequential write in `capi.js` — costs
+  ~200ms extra latency per order.
+- Token cache is module-scoped (per Worker isolate). Workers may run multiple
+  isolates; cache hit rate ~90%+ in steady state.
+- BQ Streaming Insert quota: 10K rows/sec per table — far above Lighom load.
+- Insert deduplication via `insertId = event_id` — Shopline webhook retry
+  storms result in idempotent BQ writes within 1 min window.
+
 ## Troubleshooting
 
 ### `health` returns `no_feed`
@@ -242,6 +347,22 @@ If any are missing, EMQ will plateau at 6-7.
   fields shown.
 - If `fbc/fbp` missing: Cart Attributes Injector not firing. Check that `_fbc`
   cookie sets when entering with `?fbclid=...`.
+
+### BigQuery insert returns 401 / 403
+- Service Account roles missing — need `BigQuery Data Editor` + `BigQuery Job User`
+- GCP_SA_JSON corrupted — re-paste JSON, ensure no whitespace stripped
+
+### BigQuery insert returns "no such table"
+- Dataset/table not created yet — see Phase 9.2 SQL
+- BQ_DATASET or BQ_TABLE secret typo — defaults are `lighom_capi` / `orders`
+
+### `bigquery_enabled: false` in /capi/health
+- GCP_SA_JSON secret never set or got deleted: `wrangler secret list`
+
+### Worker latency spike on first order after cache miss
+- First call after deploy / 55min idle = JWT signing + token exchange (~300ms)
+- Subsequent calls reuse cached token = <50ms BQ overhead
+- Acceptable since Shopline webhook tolerates 30s response
 
 ### Roll back to old Smart Feed
 1. Comment out `cron:` in `.github/workflows/meta-feed.yml` (don't delete).

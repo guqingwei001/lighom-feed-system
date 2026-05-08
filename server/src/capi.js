@@ -35,6 +35,8 @@
  */
 
 import { insertRow as bqInsertRow } from './bigquery.js';
+import { pinterestSend } from './pinterest.js';
+import { ga4mpSend } from './ga4mp.js';
 
 const META_API_VERSION_DEFAULT = 'v21.0';
 const BQ_DATASET_DEFAULT = 'lighom_capi';
@@ -78,36 +80,54 @@ async function handleOrderWebhook(request, env) {
   }
 
   const event = await buildMetaEvent(o, request);
-  const bqRow = buildBqRow(o, event);
 
   const apiVersion = env.META_API_VERSION || META_API_VERSION_DEFAULT;
   const endpoint = `https://graph.facebook.com/${apiVersion}/${env.META_PIXEL_ID}/events`;
   const payload = { data: [event] };
   if (env.META_TEST_EVENT_CODE) payload.test_event_code = env.META_TEST_EVENT_CODE;
 
-  // Dual-write: Meta CAPI + BigQuery in parallel. BQ failure NEVER affects Meta.
-  const [metaSettled, bqSettled] = await Promise.allSettled([
+  const noteAttrs = arrayToMap(o.note_attributes || o.noteAttributes || []);
+  const epik = noteAttrs._epik || noteAttrs.epik || '';
+  const customer = o.customer || {};
+  const userIdForGa4 = String(customer.id || customer.user_id || '');
+
+  // Phase 1: 3-way fanout to ad networks (parallel; each is independent).
+  const [metaSettled, pinterestSettled, ga4Settled] = await Promise.allSettled([
     metaSend(endpoint, env.META_CAPI_ACCESS_TOKEN, payload),
-    env.GCP_SA_JSON
-      ? bqInsertRow(env, env.BQ_DATASET || BQ_DATASET_DEFAULT, env.BQ_TABLE || BQ_TABLE_DEFAULT, bqRow, event.event_id)
-      : Promise.resolve({ ok: false, skipped: true, reason: 'GCP_SA_JSON not set' }),
+    pinterestSend(env, event, epik),
+    ga4mpSend(env, event, userIdForGa4),
   ]);
 
-  const meta = metaSettled.status === 'fulfilled'
-    ? metaSettled.value
-    : { ok: false, error: String(metaSettled.reason).slice(0, 300) };
-  const bq = bqSettled.status === 'fulfilled'
-    ? bqSettled.value
-    : { ok: false, error: String(bqSettled.reason).slice(0, 300) };
+  const meta = settledOr(metaSettled);
+  const pinterest = settledOr(pinterestSettled);
+  const google = settledOr(ga4Settled);
+
+  // Phase 2: write single BQ row containing actual statuses from all 3 platforms.
+  // (Sequential after fanout adds ~150-200ms but gives full audit trail.)
+  const bqRow = buildBqRow(o, event, { meta, pinterest, google });
+  let bq;
+  try {
+    bq = env.GCP_SA_JSON
+      ? await bqInsertRow(env, env.BQ_DATASET || BQ_DATASET_DEFAULT, env.BQ_TABLE || BQ_TABLE_DEFAULT, bqRow, event.event_id)
+      : { ok: false, skipped: true, reason: 'GCP_SA_JSON not set' };
+  } catch (err) {
+    bq = { ok: false, error: String(err).slice(0, 300) };
+  }
 
   // Always 200 to Shopline so it doesn't retry storms.
   return jsonResp(200, {
-    ok: meta.ok,                    // Shopline-visible status reflects Meta only (BQ is best-effort log)
+    ok: meta.ok,                    // Shopline-visible status = Meta (primary)
     meta,
+    pinterest,
+    google,
     bigquery: bq,
     event_id: event.event_id,
     matched_keys: Object.keys(event.user_data || {}).filter(k => event.user_data[k]),
   });
+}
+
+function settledOr(s) {
+  return s.status === 'fulfilled' ? s.value : { ok: false, error: String(s.reason).slice(0, 300) };
 }
 
 async function metaSend(endpoint, token, payload) {
@@ -132,7 +152,8 @@ async function metaSend(endpoint, token, payload) {
 
 // Build BigQuery row matching the schema in DEPLOY.md Phase 9.
 // Uses already-computed Meta event for hash reuse where possible.
-function buildBqRow(order, metaEvent) {
+function buildBqRow(order, metaEvent, dispatches) {
+  const d = dispatches || {};
   const noteAttrs = arrayToMap(order.note_attributes || order.noteAttributes || []);
   const customer = order.customer || {};
   const shippingAddr = order.shipping_address || order.shippingAddress || customer.default_address || {};
@@ -163,12 +184,13 @@ function buildBqRow(order, metaEvent) {
     utm_campaign: noteAttrs._last_utm_campaign || noteAttrs.utm_campaign || noteAttrs._first_utm_campaign || null,
     country: arr0(ud.country),
     city_hashed: arr0(ud.ct),
-    // meta_capi_status / meta_capi_response are 'pending' because we write to
-    // BQ in parallel with the Meta call (don't have result yet). To capture
-    // actual Meta status, switch to sequential write — accepted trade-off per
-    // user spec "Meta CAPI + BigQuery 并行".
-    meta_capi_status: 'pending',
-    meta_capi_response: null,
+    // Actual statuses from all 3 ad-network dispatches (sequential write).
+    meta_capi_status: d.meta ? (d.meta.ok ? 'ok' : (d.meta.skipped ? 'skipped' : 'fail')) : null,
+    meta_capi_response: d.meta ? JSON.stringify(d.meta).slice(0, 1000) : null,
+    pinterest_status: d.pinterest ? (d.pinterest.ok ? 'ok' : (d.pinterest.skipped ? 'skipped' : 'fail')) : null,
+    pinterest_response: d.pinterest ? JSON.stringify(d.pinterest).slice(0, 1000) : null,
+    google_status: d.google ? (d.google.ok ? 'ok' : (d.google.skipped ? 'skipped' : 'fail')) : null,
+    google_response: d.google ? JSON.stringify(d.google).slice(0, 1000) : null,
   };
 }
 
@@ -188,6 +210,10 @@ async function capiHealth(request, env, url) {
     bq_project: env.GCP_PROJECT_ID || null,
     bq_dataset: env.BQ_DATASET || BQ_DATASET_DEFAULT,
     bq_table: env.BQ_TABLE || BQ_TABLE_DEFAULT,
+    pinterest_enabled: !!env.PINTEREST_ACCESS_TOKEN && !!env.PINTEREST_AD_ACCOUNT_ID,
+    pinterest_test_code_set: !!env.PINTEREST_TEST_EVENT_CODE,
+    ga4_enabled: !!env.GA4_MEASUREMENT_ID && !!env.GA4_API_SECRET,
+    ga4_measurement_id: env.GA4_MEASUREMENT_ID || null,
   });
 }
 

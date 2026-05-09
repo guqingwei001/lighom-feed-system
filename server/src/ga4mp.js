@@ -100,14 +100,25 @@ export async function ga4mpSend(env, metaEvent, fallbackClientId) {
 }
 
 function metaEventToGa4(metaName) {
+  // Map Meta-style names → GA4 standard event names. Non-mapped names get
+  // PascalCase→snake_case conversion (e.g., DeepEngagement → deep_engagement)
+  // rather than plain .toLowerCase() which leaves "deepengagement" unreadable
+  // and risks duplicate-name collisions with browser gtag's snake_case events.
   const map = {
     Purchase: 'purchase',
     AddToCart: 'add_to_cart',
     ViewContent: 'view_item',
+    ViewCategory: 'view_item_list',
+    InitiateCheckout: 'begin_checkout',
+    AddPaymentInfo: 'add_payment_info',
     Search: 'search',
     Lead: 'generate_lead',
     Subscribe: 'sign_up',
     CompleteRegistration: 'sign_up',
   };
-  return map[metaName] || metaName.toLowerCase();
+  if (map[metaName]) return map[metaName];
+  return String(metaName)
+    .replace(/([a-z])([A-Z])/g, '$1_$2')        // letter↔letter case transition
+    .replace(/([A-Za-z])(\d)/g, '$1_$2')         // letter→digit (TimeOnPage180 → TimeOnPage_180)
+    .toLowerCase();
 }

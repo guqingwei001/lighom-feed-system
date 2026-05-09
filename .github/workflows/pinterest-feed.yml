@@ -2,15 +2,16 @@ name: Generate Pinterest Feed
 
 on:
   # Offset 30 min from Meta (which runs at 0 */4) so we don't hammer Shopline
-  # API in parallel. Pinterest fetches half-past hours: 30, 4:30, 8:30, ...
+  # Daily at 12:00 UTC (5 AM PT / 20:00 BJT) — 2h after Meta, no overlap.
   schedule:
-    - cron: '30 */4 * * *'
+    - cron: '0 12 * * *'
   workflow_dispatch:
 
 jobs:
   generate:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    # Normal run: 30-60min. 90min gives ~50% buffer + faster auto-recovery on stuck runs.
+    timeout-minutes: 90
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     steps:

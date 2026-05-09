@@ -2,15 +2,18 @@ name: Generate Meta Feed
 
 on:
   # Every 4 hours, on the hour. Adjust if needed; full Shopline pull
-  # for ~15K SKUs takes ~90 min, so 4-hour spacing is safe.
+  # Daily at 10:00 UTC (3 AM PT / 18:00 BJT) — outside US ad peak hours.
+  # Meta = 10:00, Pinterest = 12:00, Google = 14:00 (2h staggered, no overlap).
   schedule:
-    - cron: '0 */4 * * *'
+    - cron: '0 10 * * *'
   workflow_dispatch:
 
 jobs:
   generate:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    # Normal run: 30-60min. 90min gives ~50% buffer + faster auto-recovery on stuck runs
+    # (e.g., Shopline API hang) — old 180min meant 3h dead time before next cron tick.
+    timeout-minutes: 90
     env:
       # Opt into Node.js 24 for JS actions (Node 20 deprecation, Sep 2026)
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"

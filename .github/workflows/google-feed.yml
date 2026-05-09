@@ -2,15 +2,16 @@ name: Generate Google Feed
 
 on:
   # Cron offset 15 min from Meta + Pinterest to spread Shopline API load
-  # Meta: 0 */4, Pinterest: 30 */4, Google: 15 */4 (XX:15 UTC, X = 0,4,8,12,16,20)
+  # Daily at 14:00 UTC (7 AM PT / 22:00 BJT) — 2h after Pinterest, no overlap.
   schedule:
-    - cron: '15 */4 * * *'
+    - cron: '0 14 * * *'
   workflow_dispatch:
 
 jobs:
   generate:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    # Normal run: 30-60min. 90min gives ~50% buffer + faster auto-recovery on stuck runs.
+    timeout-minutes: 90
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     steps:

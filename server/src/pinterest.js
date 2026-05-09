@@ -46,6 +46,9 @@ export async function pinterestSend(env, metaEvent, clickIdEpik) {
   if (cd.currency) customData.currency = cd.currency;
   if (typeof cd.value === 'number') customData.value = String(cd.value);
   if (Array.isArray(cd.content_ids)) customData.content_ids = cd.content_ids.map(String);
+  // For custom events, record the original Meta-style name so Pinterest's Custom Events
+  // dashboard can group/filter by it (Pinterest accepts arbitrary custom_data keys).
+  if (eventName === 'custom') customData.event_name = String(metaEvent.event_name || '');
   // Pinterest requires contents[*].item_price as STRING (Meta uses number)
   if (Array.isArray(cd.contents)) customData.contents = cd.contents.map(c => ({
     id: String(c.id || ''),
@@ -95,11 +98,17 @@ export async function pinterestSend(env, metaEvent, clickIdEpik) {
   };
 }
 
+// Pinterest CAPI accepts ONLY these 9 standard event_name values per spec
+// (developers.pinterest.com ConversionEventsData): add_to_cart, checkout, custom,
+// lead, page_visit, search, signup, view_category, watch_video. Any other string
+// is rejected ("大量错误请求" warning in Events Manager → Health). For non-standard
+// events, send event_name="custom" and put the differentiator in custom_data.
 function metaEventToPinterest(metaName) {
   const map = {
     Purchase: 'checkout',
     AddToCart: 'add_to_cart',
     ViewContent: 'page_visit',
+    ViewCategory: 'view_category',
     Search: 'search',
     Lead: 'lead',
     CompleteRegistration: 'signup',

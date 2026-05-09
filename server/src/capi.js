@@ -95,10 +95,19 @@ async function handleOrderWebhook(request, env) {
   const customer = o.customer || {};
   const userIdForGa4 = String(customer.id || customer.user_id || '');
 
-  // Phase 1: 3-way fanout to ad networks (parallel; each is independent).
+  // Phase 1: ad-network fanout. Meta + Pinterest intentionally skipped from /capi/order
+  // because both use event_id-based dedup and Worker webhook can't access browser's
+  // serverEventId. Browser → /capi/event with serverEventId is the canonical path.
+  // GA4 stays enabled (transaction_id dedup works regardless of which path fires).
+  const skipMeta = env.WORKER_ORDER_SKIP_META !== '0';
+  const skipPinterest = env.WORKER_ORDER_SKIP_PINTEREST !== '0';
   const [metaSettled, pinterestSettled, ga4Settled] = await Promise.allSettled([
-    metaSend(endpoint, env.META_CAPI_ACCESS_TOKEN, payload),
-    pinterestSend(env, event, epik),
+    skipMeta
+      ? Promise.resolve({ ok: false, skipped: true, reason: 'order_webhook_skips_meta_to_avoid_dedup_loss' })
+      : metaSend(endpoint, env.META_CAPI_ACCESS_TOKEN, payload),
+    skipPinterest
+      ? Promise.resolve({ ok: false, skipped: true, reason: 'order_webhook_skips_pinterest_to_avoid_dedup_loss' })
+      : pinterestSend(env, event, epik),
     ga4mpSend(env, event, userIdForGa4),
   ]);
 
@@ -264,17 +273,27 @@ async function buildMetaEvent(order, request) {
   if (clientIp) userData.client_ip_address = clientIp;
   if (clientUa) userData.client_user_agent = clientUa;
 
-  // Custom data
+  // Custom data — enriched contents include title/brand/category for Catalog Ads (DPA) match.
   const lineItems = order.line_items || order.lineItems || [];
+  // Shopline webhook line items use productSku (18xxx variant = Catalog Content ID) — prefer that
+  // before falling back to productSeq (16xxx SPU group), which Meta only matches via item_group_id.
   const contents = lineItems.map(li => ({
-    id: String(li.variant_id || li.variantId || li.product_id || li.productId || li.sku || ''),
-    quantity: Number(li.quantity) || 1,
-    item_price: Number(li.price || li.unit_price || 0),
+    id: String(
+      li.productSku || li.variant_id || li.variantId || li.sku ||
+      li.productSeq || li.product_id || li.productId || ''
+    ),
+    quantity: Number(li.quantity || li.productNum) || 1,
+    /* Shopline order webhook prices are in CENTS — divide by 100 for Meta (which expects dollars). */
+    item_price: Math.round((Number(li.finalPrice || li.price || li.unit_price || 0) / 100) * 100) / 100,
+    title: String(li.title || li.name || li.productName || '').slice(0, 100),
+    brand: String(li.vendor || li.brand || 'Lighom'),
+    category: String(li.product_category || li.customCategoryName || '').slice(0, 100),
   })).filter(c => c.id);
 
-  const totalValue = Number(
+  /* Shopline total_price is in cents → divide by 100 for Meta CAPI. */
+  const totalValue = Math.round((Number(
     order.current_total_price ?? order.total_price ?? order.totalPrice ?? order.subtotal_price ?? 0
-  );
+  ) / 100) * 100) / 100;
 
   const customData = {
     currency: (order.currency || order.presentment_currency || 'USD').toUpperCase(),
@@ -284,17 +303,29 @@ async function buildMetaEvent(order, request) {
     num_items: contents.reduce((s, c) => s + c.quantity, 0),
     contents,
     order_id: String(order.id || order.order_id || ''),
+    // predicted_ltv removed: was placeholder (value*2), Meta flags as invalid LTV.
+    // Re-add only when real LTV model exists.
+    // delivery_category removed: Lighom doesn't fit Meta enum (in_store/curbside/home_delivery).
   };
 
   const eventTime = parseEventTime(order.created_at || order.createdAt) || Math.floor(Date.now() / 1000);
 
   // event_id MUST match browser Pixel's eventID for dedup.
-  // Browser side currently uses pixel's auto eventID. Best deterministic dedup
-  // anchor: order id. We use order id as event_id; browser Pixel Purchase event
-  // (Shopline native fires) should also use order id as event_id.
-  // If browser uses a different scheme, dedup may fail — but this is far
-  // better than nothing.
-  const eventId = String(order.id || order.order_id || `purchase_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+  // GTM v2 block (id 7508872161467303461) uses:
+  //   1. __PRELOAD_STATE__.serverEventId  (Shopline server-generated)
+  //   2. fallback: `purchase_${appOrderSeq}` where appOrderSeq = LIGxxxxxxxxx
+  // Webhook payload typically exposes order.name (LIGxxx) and possibly
+  // server_event_id. Match the v2 fallback first since serverEventId
+  // is rarely in webhook payload.
+  const orderSeq = String(order.name || order.app_order_seq || order.appOrderSeq || '').replace(/^#/, '');
+  const eventId = String(
+    order.server_event_id ||
+    order.serverEventId ||
+    (orderSeq ? `purchase_${orderSeq}` : '') ||
+    order.id ||
+    order.order_id ||
+    `purchase_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+  );
 
   return {
     event_name: 'Purchase',

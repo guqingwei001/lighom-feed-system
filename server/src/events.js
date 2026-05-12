@@ -30,6 +30,7 @@
 import { pinterestSend } from './pinterest.js';
 import { ga4mpSend } from './ga4mp.js';
 import { insertRow as bqInsertRow } from './bigquery.js';
+import { detectBot } from './bot_filter.js';
 
 const ALLOWED_ORIGINS = /^https:\/\/(www\.)?lighom\.com$/;
 
@@ -171,6 +172,35 @@ export async function handleEvent(request, env) {
   const needsContentIds = catalogEvents.has(body.event_name);
   const hasContentIds = Array.isArray(customData.content_ids) && customData.content_ids.length > 0;
   const contentIdsValid = !needsContentIds || hasContentIds;
+  // Bot detection — UA / ASN / CF threat score. When detected, BQ row is still
+  // written (with is_bot=true) for analysis, but CAPI fanout to Meta/Pinterest/Google
+  // is skipped to keep EMQ scoring clean.
+  const bot = detectBot(request);
+
+  // Layer-1 Purchase dedup: same order_id Purchase event fired multiple times
+  // (browser refresh / multi-tab / bot crawl of confirmation page / Purchase v8
+  // hijack bypass) — keep first, drop rest. KV TTL 24h covers email-link revisits.
+  // 5/9 production observation: LIG100131863 ($463.80) fired 5x in 35 minutes from
+  // 3 devices + 2 countries; LIG100131875 4x; LIG100131856 3x. All same-day same-order.
+  let isDuplicate = false;
+  let dupFirstSeen = null;
+  const orderIdForDedup = isPurchase && cd.order_id ? String(cd.order_id) : null;
+  if (orderIdForDedup && env.PURCHASE_DEDUP) {
+    const kvKey = `purchase_order_${orderIdForDedup}`;
+    try {
+      const prev = await env.PURCHASE_DEDUP.get(kvKey);
+      if (prev) {
+        isDuplicate = true;
+        dupFirstSeen = prev;
+      } else {
+        await env.PURCHASE_DEDUP.put(kvKey, new Date().toISOString(), { expirationTtl: 86400 });
+      }
+    } catch (e) {
+      // KV outage should not block fanout — fail open
+      console.error('PURCHASE_DEDUP error:', String(e).slice(0, 200));
+    }
+  }
+
   // Selective fanout: clients can request a subset of platforms via body.fanout.
   // Allows splitting Meta+GA4 (immediate) from Pinterest (deferred 200ms for pintrk
   // hijack capture) without affecting Meta CAPI delivery latency.
@@ -180,15 +210,15 @@ export async function handleEvent(request, env) {
     ? new Set(body.fanout.map((s) => String(s).toLowerCase()))
     : new Set(['meta', 'pinterest', 'ga4']);
 
-  const wantMeta = fanoutSet.has('meta');
-  const wantPinterest = fanoutSet.has('pinterest');
-  const wantGa4 = fanoutSet.has('ga4');
+  const wantMeta = fanoutSet.has('meta') && !bot.is_bot && !isDuplicate;
+  const wantPinterest = fanoutSet.has('pinterest') && !bot.is_bot && !isDuplicate;
+  const wantGa4 = fanoutSet.has('ga4') && !bot.is_bot && !isDuplicate;
 
   const metaPromise = wantMeta
     ? ((purchaseValid && contentIdsValid)
         ? metaCustomEventSend(env, metaEvent)
         : Promise.resolve({ ok: false, skipped: true, reason: !purchaseValid ? 'purchase_missing_value_or_currency' : 'missing_content_ids' }))
-    : Promise.resolve({ ok: false, skipped: true, reason: 'fanout_excluded' });
+    : Promise.resolve({ ok: false, skipped: true, reason: isDuplicate ? `dedup_first_seen:${dupFirstSeen}` : (bot.is_bot ? `bot_filtered:${bot.reason}` : 'fanout_excluded') });
 
   // For Pinterest, allow client to override event_id with the value Shopline native
   // pintrk used (e.g. "PageView_xxx" / "ViewItem_xxx"). Without this, Worker CAPI events
@@ -203,11 +233,11 @@ export async function handleEvent(request, env) {
 
   const pinterestPromise = wantPinterest
     ? pinterestSend(env, pinterestEvent, ud.epik || '')
-    : Promise.resolve({ ok: false, skipped: true, reason: 'fanout_excluded' });
+    : Promise.resolve({ ok: false, skipped: true, reason: isDuplicate ? `dedup_first_seen:${dupFirstSeen}` : (bot.is_bot ? `bot_filtered:${bot.reason}` : 'fanout_excluded') });
 
   const ga4Promise = wantGa4
     ? ga4mpSend(env, metaEvent, gaClientId)
-    : Promise.resolve({ ok: false, skipped: true, reason: 'fanout_excluded' });
+    : Promise.resolve({ ok: false, skipped: true, reason: isDuplicate ? `dedup_first_seen:${dupFirstSeen}` : (bot.is_bot ? `bot_filtered:${bot.reason}` : 'fanout_excluded') });
 
   const [metaSettled, pinterestSettled, ga4Settled] = await Promise.allSettled([
     metaPromise,
@@ -249,6 +279,11 @@ export async function handleEvent(request, env) {
     pinterest_response: JSON.stringify(pinterest).slice(0, 1000),
     google_status: google.ok ? 'ok' : (google.skipped ? 'skipped' : 'fail'),
     google_response: JSON.stringify(google).slice(0, 1000),
+    is_bot: bot.is_bot,
+    bot_reason: bot.reason || null,
+    bot_asn: bot.asn || null,
+    is_duplicate: isDuplicate,
+    duplicate_first_seen: dupFirstSeen,
   };
 
   // Skip BQ when client requests it (e.g., the deferred Pinterest-only POST in the

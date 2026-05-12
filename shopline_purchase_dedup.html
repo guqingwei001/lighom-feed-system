@@ -1,0 +1,144 @@
+<!--
+  Layer-2 Purchase dedup — Shopline thank-you / order-confirmation page lock.
+
+  Goal: prevent fbq('track','Purchase') and pintrk('track','checkout') and
+  gtag('event','purchase') from firing more than once per order_no, even when
+  the user refreshes the thank-you page, opens the confirmation email link
+  in a new tab, or revisits the page hours later.
+
+  Placement: Shopline admin → Settings → Custom code (or Theme code editor) →
+  add as a NEW block on the **thank-you / order confirmation** template
+  ONLY. Must load BEFORE Shopline's native pixel block (so the wrapper is in
+  place when fbq/pintrk/gtag get called).
+
+  Storage: uses both sessionStorage (same tab) AND localStorage (across tabs /
+  same device days later). Cross-device dup needs the Worker KV (Layer 1).
+-->
+<script>
+(function () {
+  'use strict';
+
+  // 1) Resolve order_no from Shopline's global injected on confirmation page
+  var orderNo = '';
+  try {
+    if (window.SLM_ORDER && window.SLM_ORDER.order_no) orderNo = String(window.SLM_ORDER.order_no);
+    else if (window.__INITIAL_STATE__ && window.__INITIAL_STATE__.order && window.__INITIAL_STATE__.order.order_no)
+      orderNo = String(window.__INITIAL_STATE__.order.order_no);
+    else {
+      // Fallback: scrape from URL path /thank-you/<order_no>
+      var m = location.pathname.match(/\/(thank[-_]?you|checkouts?|order)\/([A-Za-z0-9]+)/i);
+      if (m) orderNo = m[2];
+    }
+  } catch (e) { /* swallow */ }
+
+  if (!orderNo) {
+    // Cannot identify order — let pixels fire as before. Worker KV (Layer 1) will catch.
+    return;
+  }
+
+  var key = 'lighom_purchase_fired_' + orderNo;
+  var alreadyFired = false;
+  try {
+    alreadyFired = !!(sessionStorage.getItem(key) || localStorage.getItem(key));
+  } catch (e) { /* private mode etc — fail open */ }
+
+  if (alreadyFired) {
+    // Wrap each pixel global to no-op on Purchase event_name only
+    wrapFbq();
+    wrapPintrk();
+    wrapGtag();
+    console.log('[lighom-dedup] purchase suppressed for', orderNo);
+    return;
+  }
+
+  // First fire — mark; allow native pixels to fire normally
+  var stamp = String(Date.now());
+  try { sessionStorage.setItem(key, stamp); } catch (e) {}
+  try { localStorage.setItem(key, stamp); } catch (e) {}
+  // Auto-expire localStorage entry after 30 days to avoid growth (Shopline never clears)
+  try {
+    var expiryKey = key + '_exp';
+    localStorage.setItem(expiryKey, String(Date.now() + 30 * 86400000));
+  } catch (e) {}
+
+  function wrapFbq() {
+    var wait = 0;
+    var iv = setInterval(function () {
+      wait += 50;
+      if (window.fbq) {
+        var orig = window.fbq;
+        window.fbq = function () {
+          var args = Array.prototype.slice.call(arguments);
+          // fbq('track', 'Purchase', {...}) — drop these
+          if (args[0] === 'track' && args[1] === 'Purchase') return;
+          // fbq('trackSingle', pixelId, 'Purchase', {...}) — drop these too
+          if (args[0] === 'trackSingle' && args[2] === 'Purchase') return;
+          return orig.apply(this, args);
+        };
+        // Preserve the helper props fbq has (callMethod, push, etc)
+        for (var k in orig) try { window.fbq[k] = orig[k]; } catch (e) {}
+        clearInterval(iv);
+      }
+      if (wait > 5000) clearInterval(iv);
+    }, 50);
+  }
+
+  function wrapPintrk() {
+    var wait = 0;
+    var iv = setInterval(function () {
+      wait += 50;
+      if (window.pintrk) {
+        var orig = window.pintrk;
+        window.pintrk = function () {
+          var args = Array.prototype.slice.call(arguments);
+          // pintrk('track', 'checkout', {...}) is Pinterest's Purchase equivalent
+          if (args[0] === 'track' && (args[1] === 'checkout' || args[1] === 'Purchase')) return;
+          return orig.apply(this, args);
+        };
+        for (var k in orig) try { window.pintrk[k] = orig[k]; } catch (e) {}
+        clearInterval(iv);
+      }
+      if (wait > 5000) clearInterval(iv);
+    }, 50);
+  }
+
+  function wrapGtag() {
+    var wait = 0;
+    var iv = setInterval(function () {
+      wait += 50;
+      if (window.gtag) {
+        var orig = window.gtag;
+        window.gtag = function () {
+          var args = Array.prototype.slice.call(arguments);
+          // gtag('event', 'purchase', {...}) — drop these
+          if (args[0] === 'event' && args[1] === 'purchase') return;
+          // gtag('event', 'conversion', {...}) — Google Ads conversion, drop too
+          if (args[0] === 'event' && args[1] === 'conversion') {
+            var params = args[2] || {};
+            // Only drop purchase-attributed conversions; allow signup/lead conversions
+            if (params.transaction_id || params.value) return;
+          }
+          return orig.apply(this, args);
+        };
+        clearInterval(iv);
+      }
+      if (wait > 5000) clearInterval(iv);
+    }, 50);
+  }
+
+  // Periodic localStorage cleanup (run on every confirmation page load)
+  try {
+    var now = Date.now();
+    for (var i = localStorage.length - 1; i >= 0; i--) {
+      var k = localStorage.key(i);
+      if (k && k.startsWith('lighom_purchase_fired_') && k.endsWith('_exp')) {
+        var exp = parseInt(localStorage.getItem(k) || '0', 10);
+        if (exp && exp < now) {
+          localStorage.removeItem(k);
+          localStorage.removeItem(k.replace(/_exp$/, ''));
+        }
+      }
+    }
+  } catch (e) {}
+})();
+</script>

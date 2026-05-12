@@ -7,6 +7,14 @@ workers_dev = true
 binding = "FEEDS"
 bucket_name = "lighom-feeds"
 
+# Purchase dedup KV — same order_id Purchase event firing > 1x within 24h is
+# deduped at the Worker (browser refresh / multi-tab / bot crawl / hijack bypass).
+# Create via: wrangler kv namespace create PURCHASE_DEDUP
+# Then paste the returned id below.
+[[kv_namespaces]]
+binding = "PURCHASE_DEDUP"
+id = "abeb0a8287314cd4b27ddf4da33b43e3"
+
 # To bind feed.lighom.com later (after adding lighom.com as a Cloudflare zone),
 # uncomment the block below and re-run `wrangler deploy`.
 # [[routes]]

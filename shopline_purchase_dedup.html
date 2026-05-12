@@ -18,14 +18,19 @@
 (function () {
   'use strict';
 
-  // 1) Resolve order_no from Shopline's global injected on confirmation page
+  // 1) Resolve orderSeq from Shopline's __PRELOAD_STATE__ (verified 2026-05-08
+  //    pattern, see block 7508872161467303461). Earlier code used SLM_ORDER /
+  //    __INITIAL_STATE__ which DO NOT exist on Shopline storefront — Layer 2 was
+  //    silently a no-op 5/9–5/12 (BQ showed 7 orders firing 25× Purchase events,
+  //    avg 3.57×/order). Fixed 5/12.
   var orderNo = '';
   try {
-    if (window.SLM_ORDER && window.SLM_ORDER.order_no) orderNo = String(window.SLM_ORDER.order_no);
-    else if (window.__INITIAL_STATE__ && window.__INITIAL_STATE__.order && window.__INITIAL_STATE__.order.order_no)
-      orderNo = String(window.__INITIAL_STATE__.order.order_no);
-    else {
-      // Fallback: scrape from URL path /thank-you/<order_no>
+    var ps = window.__PRELOAD_STATE__;
+    var basic = ps && ps.orders && ps.orders.basicInfo;
+    if (basic && basic.orderSeq) {
+      orderNo = String(basic.orderSeq);
+    } else {
+      // Defensive fallback: scrape URL if PRELOAD_STATE is somehow missing
       var m = location.pathname.match(/\/(thank[-_]?you|checkouts?|order)\/([A-Za-z0-9]+)/i);
       if (m) orderNo = m[2];
     }

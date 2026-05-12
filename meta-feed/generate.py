@@ -15,13 +15,18 @@ from shopline_client import fetch_all_products, discover_spu_ids
 from product_processor import (
     process_products, derive_cat_map_from_smart_feed_xml,
 )
-from r2_uploader import upload_feed, upload_log
+from r2_uploader import upload_feed, upload_log, get_last_variant_count
 from xml_builder import build_meta_xml
 from validator import validate
 
 LOCAL_XML = '/tmp/meta-feed.xml'
 LOCAL_SMART_FEED = '/tmp/smart-feed.xml'
 SMART_FEED_URL = 'http://public.myshopline.com/prod/file/facebook/feed/lighom_50345.xml'
+R2_KEY = 'meta-feed.xml'
+
+# Refuse upload if new variant count drops > 10% vs previous publish (read from
+# R2 metadata). Defends DPA against catastrophic feed shrinkage from build / API hiccups.
+MIN_FRACTION_VS_LAST = 0.90
 
 
 def _download_smart_feed_for_categories():
@@ -61,9 +66,23 @@ def main() -> int:
             upload_log(log)
             return 1
 
-        print('[meta] uploading to R2...', flush=True)
-        upload_feed(LOCAL_XML, 'meta-feed.xml',
-                    variant_count=v['stats']['item_count'])
+        # Sanity guard: refuse upload if variant count drops > 10% vs previous publish
+        new_count = v['stats']['item_count']
+        last_count = get_last_variant_count(R2_KEY)
+        threshold = int(last_count * MIN_FRACTION_VS_LAST) if last_count else 0
+        if last_count and new_count < threshold:
+            msg = (f'REFUSE_UPLOAD: new variant count {new_count} < last {last_count} × '
+                   f'{MIN_FRACTION_VS_LAST} = {threshold}. R2 retains previous good feed.')
+            print(f'[meta] {msg}', flush=True)
+            log['note'] = msg
+            log['variantCount'] = new_count
+            log['lastCount'] = last_count
+            log['durationMs'] = int((time.time() - t0) * 1000)
+            upload_log(log)
+            return 2
+
+        print(f'[meta] uploading to R2 ({new_count} variants; last={last_count or "n/a"})...', flush=True)
+        upload_feed(LOCAL_XML, R2_KEY, variant_count=new_count)
 
         log.update({
             'success': True,

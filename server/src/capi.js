@@ -83,15 +83,20 @@ async function handleOrderWebhook(request, env) {
     return jsonResp(500, { ok: false, error: 'missing_secrets' });
   }
 
-  const event = await buildMetaEvent(o, request);
+  const noteAttrs = extractCartAttrs(o);
+  // Shopline order webhook records the buyer's last landing URL (Traffic details
+  // UI proves it). Field name not 100% confirmed — try several common variants.
+  // The parsed result is logged so the next live order reveals the actual field.
+  const landingInfo = parseLandingAttribution(o);
+
+  const event = await buildMetaEvent(o, request, landingInfo);
 
   const apiVersion = env.META_API_VERSION || META_API_VERSION_DEFAULT;
   const endpoint = `https://graph.facebook.com/${apiVersion}/${env.META_PIXEL_ID}/events`;
   const payload = { data: [event] };
   if (env.META_TEST_EVENT_CODE) payload.test_event_code = env.META_TEST_EVENT_CODE;
 
-  const noteAttrs = arrayToMap(o.note_attributes || o.noteAttributes || []);
-  const epik = noteAttrs._epik || noteAttrs.epik || '';
+  const epik = noteAttrs._epik || noteAttrs.epik || landingInfo.epik || '';
   const customer = o.customer || {};
   const userIdForGa4 = String(customer.id || customer.user_id || '');
 
@@ -117,7 +122,7 @@ async function handleOrderWebhook(request, env) {
 
   // Phase 2: write single BQ row containing actual statuses from all 3 platforms.
   // (Sequential after fanout adds ~150-200ms but gives full audit trail.)
-  const bqRow = buildBqRow(o, event, { meta, pinterest, google });
+  const bqRow = buildBqRow(o, event, { meta, pinterest, google }, landingInfo);
   let bq;
   try {
     bq = env.GCP_SA_JSON
@@ -136,7 +141,68 @@ async function handleOrderWebhook(request, env) {
     bigquery: bq,
     event_id: event.event_id,
     matched_keys: Object.keys(event.user_data || {}).filter(k => event.user_data[k]),
+    landing: landingInfo,           // surfaces which field hit + parsed params for debugging
   });
+}
+
+// Classify whether an order is a synthetic/test row (filter from analytics)
+function classifyTestRow(order) {
+  const oid = String(order.id || order.order_id || '');
+  if (/^(SMOKE_|SYNTH_|TEST_|smoke_|p1_|p2_)/.test(oid)) return true;
+  const email = (order.email || (order.customer && order.customer.email) || '').toLowerCase();
+  if (email === 'probe@lighom.com' || email.endsWith('@lighom.com.test')) return true;
+  return false;
+}
+
+// Extract attribution params (epik, utm_*, click_ids) from the Shopline order's
+// landing URL. Tries several field name variants because we haven't pinned down
+// Shopline v20260901's exact key — landingFieldHit in response surfaces the winner.
+function parseLandingAttribution(o) {
+  const clientDetails = o.client_details || o.clientDetails || {};
+  const candidates = [
+    ['landing_site', o.landing_site],
+    ['landingSite', o.landingSite],
+    ['landing_url', o.landing_url],
+    ['landingUrl', o.landingUrl],
+    ['lastLandingUrl', o.lastLandingUrl],
+    ['last_landing_url', o.last_landing_url],
+    ['landing_page', o.landing_page],
+    ['landingPageUrl', o.landingPageUrl],
+    ['client_details.landing_site', clientDetails.landing_site],
+    ['client_details.landingSite', clientDetails.landingSite],
+    ['client_details.landing_url', clientDetails.landing_url],
+    ['client_details.referrer', clientDetails.referrer],
+    ['referring_site', o.referring_site],
+    ['referrer', o.referrer],
+  ];
+  let url = '', hit = null;
+  for (const [k, v] of candidates) {
+    if (typeof v === 'string' && v.startsWith('http')) { url = v; hit = k; break; }
+  }
+  const out = {
+    landingFieldHit: hit,
+    landingUrl: url ? url.slice(0, 500) : null,
+    epik: null, utm_source: null, utm_medium: null, utm_campaign: null,
+    utm_content: null, utm_term: null,
+    pins_campaign_id: null, fbclid: null, gclid: null, ttclid: null, msclkid: null,
+  };
+  if (!url) return out;
+  try {
+    const u = new URL(url);
+    const q = u.searchParams;
+    out.epik = q.get('epik') || null;
+    out.utm_source = q.get('utm_source');
+    out.utm_medium = q.get('utm_medium');
+    out.utm_campaign = q.get('utm_campaign');
+    out.utm_content = q.get('utm_content');
+    out.utm_term = q.get('utm_term');
+    out.pins_campaign_id = q.get('pins_campaign_id');
+    out.fbclid = q.get('fbclid');
+    out.gclid = q.get('gclid');
+    out.ttclid = q.get('ttclid');
+    out.msclkid = q.get('msclkid');
+  } catch (_) {}
+  return out;
 }
 
 function settledOr(s) {
@@ -165,9 +231,10 @@ async function metaSend(endpoint, token, payload) {
 
 // Build BigQuery row matching the schema in DEPLOY.md Phase 9.
 // Uses already-computed Meta event for hash reuse where possible.
-function buildBqRow(order, metaEvent, dispatches) {
+function buildBqRow(order, metaEvent, dispatches, landingInfo) {
   const d = dispatches || {};
-  const noteAttrs = arrayToMap(order.note_attributes || order.noteAttributes || []);
+  const li = landingInfo || {};
+  const noteAttrs = extractCartAttrs(order);
   const customer = order.customer || {};
   const shippingAddr = order.shipping_address || order.shippingAddress || customer.default_address || {};
 
@@ -192,9 +259,15 @@ function buildBqRow(order, metaEvent, dispatches) {
     value: typeof cd.value === 'number' ? cd.value : null,
     currency: cd.currency || null,
     product_ids: Array.isArray(cd.content_ids) ? cd.content_ids : [],
-    utm_source: noteAttrs._last_utm_source || noteAttrs.utm_source || noteAttrs._first_utm_source || null,
-    utm_medium: noteAttrs._last_utm_medium || noteAttrs.utm_medium || noteAttrs._first_utm_medium || null,
-    utm_campaign: noteAttrs._last_utm_campaign || noteAttrs.utm_campaign || noteAttrs._first_utm_campaign || null,
+    utm_source: noteAttrs._last_utm_source || noteAttrs.utm_source || noteAttrs._first_utm_source || li.utm_source || null,
+    utm_medium: noteAttrs._last_utm_medium || noteAttrs.utm_medium || noteAttrs._first_utm_medium || li.utm_medium || null,
+    utm_campaign: noteAttrs._last_utm_campaign || noteAttrs.utm_campaign || noteAttrs._first_utm_campaign || li.utm_campaign || null,
+    utm_content: li.utm_content || null,
+    epik: noteAttrs._epik || noteAttrs.epik || li.epik || null,
+    fbclid: li.fbclid || null,
+    pins_campaign_id: li.pins_campaign_id || null,
+    landing_url: li.landingUrl || null,
+    data_quality: classifyTestRow(order) ? 'test' : null,
     country: arr0(ud.country),
     city_hashed: arr0(ud.ct),
     // Actual statuses from all 3 ad-network dispatches (sequential write).
@@ -232,8 +305,9 @@ async function capiHealth(request, env, url) {
 
 // ===== Meta event builder =====
 
-async function buildMetaEvent(order, request) {
-  const noteAttrs = arrayToMap(order.note_attributes || order.noteAttributes || []);
+async function buildMetaEvent(order, request, landingInfo) {
+  const li = landingInfo || {};
+  const noteAttrs = extractCartAttrs(order);
 
   // Customer fields (Shopline order/created)
   const customer = order.customer || {};
@@ -251,8 +325,15 @@ async function buildMetaEvent(order, request) {
   const country = (shippingAddr.country_code || shippingAddr.country || '').toLowerCase().slice(0, 2);
   const externalId = String(customer.id || customer.user_id || order.user_id || '');
 
-  // Browser-set fields from cart attributes
-  const fbc = noteAttrs._fbc || '';
+  // Browser-set fields from cart attributes; if _fbc missing but landing URL has
+  // fbclid, construct fbc = fb.<ver>.<click_ts_ms>.<fbclid> per Meta CAPI spec.
+  // Subdomain index = 1 (lighom.com is eTLD+1). click_ts uses order created_at
+  // when known (closest proxy to actual click time available in webhook payload).
+  let fbc = noteAttrs._fbc || '';
+  if (!fbc && li.fbclid) {
+    const clickTsMs = parseEventTime(order.created_at || order.createdAt) * 1000 || Date.now();
+    fbc = `fb.1.${clickTsMs}.${li.fbclid}`;
+  }
   const fbp = noteAttrs._fbp || '';
   const userAgentFromCart = noteAttrs._user_agent || '';
   const clientIp = clientDetails.browser_ip || clientDetails.ip || clientDetails.client_ip || '';
@@ -347,6 +428,29 @@ function arrayToMap(arr) {
     if (it && it.name) m[it.name] = it.value;
   }
   return m;
+}
+
+// Defensive cart-attributes extraction. Lighom storefront Cart Attrs Injector
+// POSTs to /cart/update.js with `{attributes: {...}}` (Shopify convention,
+// confirmed 5/13 to work on Shopline). Shopline order/created webhook payload
+// field name is not 100% confirmed — try array form first (note_attributes),
+// then dict form (attributes), accumulate into single flat map. Last-wins.
+function extractCartAttrs(order) {
+  const o = order || {};
+  const out = {};
+  // Array form: [{name,value}, ...]
+  for (const arr of [o.note_attributes, o.noteAttributes, o.cart_note_attributes]) {
+    if (Array.isArray(arr)) {
+      for (const it of arr) if (it && it.name) out[it.name] = it.value;
+    }
+  }
+  // Dict form: {key: value}
+  for (const dict of [o.attributes, o.cart_attributes, o.cartAttributes]) {
+    if (dict && typeof dict === 'object' && !Array.isArray(dict)) {
+      for (const k of Object.keys(dict)) out[k] = dict[k];
+    }
+  }
+  return out;
 }
 
 function normPhone(p) {

@@ -195,9 +195,9 @@ custom code blocks are deployed in Shopline admin (Apps → Custom Code):
 
 | Block | Purpose |
 |---|---|
-| GTM Capture All Click IDs | sets `_fbc` cookie from `?fbclid=` |
-| GTM User Data Enricher | hashes em/ph/etc + bootstraps `_fbp` |
-| GTM Cart Attributes Injector | mirrors `_fbc/_fbp/_user_agent/UTM` into cart.attributes |
+| Lighom Capture All Click IDs | sets `_fbc` cookie from `?fbclid=` |
+| Lighom User Data Enricher | hashes em/ph/etc + bootstraps `_fbp` |
+| Lighom Cart Attributes Injector | mirrors `_fbc/_fbp/_user_agent/UTM` into cart.attributes |
 
 If any are missing, EMQ will plateau at 6-7.
 

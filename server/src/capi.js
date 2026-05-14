@@ -319,10 +319,14 @@ async function buildMetaEvent(order, request, landingInfo) {
   const phone = normPhone(order.phone || customer.phone || shippingAddr.phone || '');
   const firstName = (shippingAddr.first_name || customer.first_name || '').toLowerCase().trim();
   const lastName = (shippingAddr.last_name || customer.last_name || '').toLowerCase().trim();
-  const city = (shippingAddr.city || '').toLowerCase().replace(/\s/g, '');
-  const stateCode = (shippingAddr.province_code || shippingAddr.province || '').toLowerCase().replace(/\s/g, '');
-  const zip = (shippingAddr.zip || '').toLowerCase().replace(/\s/g, '').slice(0, 5);
   const country = (shippingAddr.country_code || shippingAddr.country || '').toLowerCase().slice(0, 2);
+  const city = (shippingAddr.city || '').toLowerCase().replace(/\s/g, '');
+  // State: prefer province_code (e.g. "CA") over full name ("California") per Meta spec.
+  // For GB orders shippingAddr.province may be "Greater London" - lowercased w/ spaces removed.
+  const stateCode = (shippingAddr.province_code || shippingAddr.province || '').toLowerCase().replace(/\s/g, '');
+  // Country-aware zip normalization. Default 5-char slice was truncating UK postcodes
+  // (SW1A 1AA → sw1a1, missing last 2 chars → hash mismatch with Meta records).
+  const zip = normZip(shippingAddr.zip || '', country);
   const externalId = String(customer.id || customer.user_id || order.user_id || '');
 
   // Browser-set fields from cart attributes; if _fbc missing but landing URL has
@@ -451,6 +455,18 @@ function extractCartAttrs(order) {
     }
   }
   return out;
+}
+
+function normZip(zip, countryCode) {
+  if (!zip) return '';
+  const z = String(zip).toLowerCase().replace(/\s/g, '');
+  const cc = (countryCode || '').toLowerCase();
+  if (cc === 'us' || cc === 'ca') return z.slice(0, 5);   // US ZIP5 / CA postal prefix
+  if (cc === 'gb') return z;                              // UK postcode: variable 5-8 chars alphanumeric, preserve full
+  if (['de','fr','es','it','nl','be','at','pl','dk','se','no','fi','pt','ie','ch'].includes(cc)) {
+    return z.slice(0, 5);                                 // EU 5-digit common
+  }
+  return z;                                               // Unknown country: preserve as-is
 }
 
 function normPhone(p) {

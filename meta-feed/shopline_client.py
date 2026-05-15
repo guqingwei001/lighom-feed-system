@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import time
 import urllib.request
@@ -58,29 +59,45 @@ def discover_spu_ids() -> list[str]:
     return out
 
 
-def _fetch_one(spu: str, retries: int = 4) -> tuple[str, dict | None, str | None]:
+_RETRY_HTTP_CODES = (408, 429, 500, 502, 503, 504)
+
+
+def _fetch_one(spu: str, retries: int = 8, timeout: float = 30) -> tuple[str, dict | None, str | None]:
     base = _api_base()
     url = f'{base}/products/{spu}.json'
+    last_err = None
     for attempt in range(retries):
         try:
             req = urllib.request.Request(url, headers=_auth_headers())
-            with urllib.request.urlopen(req, timeout=15) as r:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
                 body = json.loads(r.read())
             return spu, body.get('product', body), None
         except urllib.error.HTTPError as e:
-            if e.code in (429, 500, 502, 503):
-                time.sleep((1.5 ** attempt) * 0.5); continue
-            return spu, None, f'HTTP {e.code}'
+            last_err = f'HTTP {e.code}'
+            if e.code in _RETRY_HTTP_CODES:
+                # Exponential backoff with full jitter
+                sleep_s = min(60, (1.7 ** attempt) * 0.5) * (0.5 + random.random())
+                time.sleep(sleep_s); continue
+            return spu, None, last_err
         except Exception as e:
-            time.sleep(0.5)
+            last_err = str(e)[:160]
+            sleep_s = min(30, (1.5 ** attempt) * 0.5) * (0.5 + random.random())
+            time.sleep(sleep_s)
             if attempt == retries - 1:
-                return spu, None, str(e)[:160]
-    return spu, None, 'retries exhausted'
+                return spu, None, last_err
+    return spu, None, last_err or 'retries exhausted'
 
 
 def fetch_all_products(spu_ids: Iterable[str] | None = None,
                       max_workers: int = 5) -> list[dict]:
-    """Fetch every product. Returns a list of Shopline product dicts."""
+    """Fetch every product. Returns a list of Shopline product dicts.
+
+    Two-pass strategy:
+      Pass 1: concurrent (max_workers threads), default retries per SPU.
+      Pass 2: single-threaded retry over SPUs that failed pass 1, with longer
+              backoff. This recovers the silent-drop tail caused by transient
+              429/500/timeout — historically ~2% of catalog (308/15,518 on 5/13).
+    """
     if spu_ids is None:
         spu_ids = discover_spu_ids()
     spu_ids = list(spu_ids)
@@ -104,9 +121,30 @@ def fetch_all_products(spu_ids: Iterable[str] | None = None,
                 print(f'[shopline]   {n_done}/{len(spu_ids)} ok={len(out)} '
                       f'err={len(errors)} rate={rate:.1f}/s eta={eta/60:.1f}min',
                       flush=True)
-    elapsed = (time.time() - t0) / 60
-    print(f'[shopline] done in {elapsed:.1f}min: ok={len(out)} err={len(errors)}', flush=True)
+    pass1_elapsed = (time.time() - t0) / 60
+    print(f'[shopline] pass1 done in {pass1_elapsed:.1f}min: ok={len(out)} err={len(errors)}', flush=True)
+
+    # Pass 2: single-threaded recovery over pass-1 failures.
     if errors:
-        for spu, err in errors[:10]:
+        retry_spus = [spu for spu, _ in errors]
+        print(f'[shopline] pass2 retrying {len(retry_spus)} failures (single-threaded, longer backoff)', flush=True)
+        errors = []
+        t1 = time.time()
+        for i, spu in enumerate(retry_spus):
+            _, prod, err = _fetch_one(spu, retries=12, timeout=45)
+            if err:
+                errors.append((spu, err))
+            else:
+                out.append(prod)
+            if (i + 1) % 50 == 0:
+                print(f'[shopline]   pass2 {i+1}/{len(retry_spus)} ok={len(retry_spus)-len(errors)} err={len(errors)}', flush=True)
+            time.sleep(0.3 + random.random() * 0.4)  # gentle pacing
+        print(f'[shopline] pass2 done in {(time.time()-t1)/60:.1f}min: '
+              f'recovered={len(retry_spus)-len(errors)} still_err={len(errors)}', flush=True)
+
+    elapsed = (time.time() - t0) / 60
+    print(f'[shopline] total {elapsed:.1f}min: ok={len(out)} final_err={len(errors)}', flush=True)
+    if errors:
+        for spu, err in errors[:20]:
             print(f'[shopline]   error {spu}: {err}', flush=True)
     return out

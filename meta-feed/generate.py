@@ -28,6 +28,10 @@ R2_KEY = 'meta-feed.xml'
 # R2 metadata). Defends DPA against catastrophic feed shrinkage from build / API hiccups.
 MIN_FRACTION_VS_LAST = 0.90
 
+# Reject feed if Shopline API success rate < this fraction — defends against
+# silent SPU drop (5/13 incident: ~2% SPUs lost to transient API errors).
+MIN_FETCH_SUCCESS_RATE = 0.99
+
 
 def _download_smart_feed_for_categories():
     """Smart Feed XML carries authoritative product_type per SPU. We use it
@@ -49,7 +53,22 @@ def main() -> int:
         cat_map = _download_smart_feed_for_categories()
         products = fetch_all_products(spu_ids)
 
-        print(f'[meta] processing {len(products)} products...', flush=True)
+        # Shortfall guard: fail fast if Shopline API silently dropped too many SPUs.
+        fetch_rate = len(products) / max(len(spu_ids), 1)
+        if fetch_rate < MIN_FETCH_SUCCESS_RATE:
+            msg = (f'FETCH_SHORTFALL: only {len(products)}/{len(spu_ids)} = '
+                   f'{fetch_rate:.2%} fetched < {MIN_FETCH_SUCCESS_RATE:.0%}. '
+                   f'R2 retains previous good feed.')
+            print(f'[meta] {msg}', flush=True)
+            log['note'] = msg
+            log['fetchRate'] = fetch_rate
+            log['fetched'] = len(products)
+            log['expected'] = len(spu_ids)
+            log['durationMs'] = int((time.time() - t0) * 1000)
+            upload_log(log)
+            return 3
+
+        print(f'[meta] processing {len(products)} products (fetch_rate={fetch_rate:.2%})...', flush=True)
         items = process_products(products, cat_map=cat_map)
         print(f'[meta] generated {len(items)} catalog items', flush=True)
 

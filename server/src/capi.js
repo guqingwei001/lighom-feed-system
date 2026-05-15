@@ -79,14 +79,13 @@ async function handleOrderWebhook(request, env) {
   // Shopline may wrap payload in {order:{...}} or send order directly
   const o = order.order || order;
 
-  // DIAG 5/15: one-shot trace of price fields to verify dollars-vs-cents.
-  // BQ orders.value shows real_price/100 — need to confirm whether Shopline
-  // top-level total_price is dollars (no /100 needed) or cents (current /100 right).
-  // Remove this block after one live order's payload is captured.
+  // DIAG 5/15: one-shot trace of raw Shopline price fields. Written to
+  // orders.raw_price_diag so we don't depend on wrangler tail.
+  // Remove this block + column after one capture.
+  let priceDiag = null;
   try {
     const oil = (o.orderItemList || o.line_items || [])[0] || {};
-    console.log('PRICE_DIAG', JSON.stringify({
-      order_id: o.id || o.order_id || null,
+    priceDiag = JSON.stringify({
       current_total_price: o.current_total_price,
       total_price: o.total_price,
       totalPrice: o.totalPrice,
@@ -98,8 +97,8 @@ async function handleOrderWebhook(request, env) {
       line0_price: oil.price,
       line0_unit_price: oil.unit_price,
       line0_quantity: oil.quantity,
-    }));
-  } catch (_) { /* never break webhook on diag */ }
+    });
+  } catch (_) { priceDiag = 'DIAG_ERROR'; }
 
   if (!env.META_PIXEL_ID || !env.META_CAPI_ACCESS_TOKEN) {
     return jsonResp(500, { ok: false, error: 'missing_secrets' });
@@ -144,7 +143,7 @@ async function handleOrderWebhook(request, env) {
 
   // Phase 2: write single BQ row containing actual statuses from all 3 platforms.
   // (Sequential after fanout adds ~150-200ms but gives full audit trail.)
-  const bqRow = buildBqRow(o, event, { meta, pinterest, google }, landingInfo);
+  const bqRow = buildBqRow(o, event, { meta, pinterest, google }, landingInfo, priceDiag);
   let bq;
   try {
     bq = env.GCP_SA_JSON
@@ -253,7 +252,7 @@ async function metaSend(endpoint, token, payload) {
 
 // Build BigQuery row matching the schema in DEPLOY.md Phase 9.
 // Uses already-computed Meta event for hash reuse where possible.
-function buildBqRow(order, metaEvent, dispatches, landingInfo) {
+function buildBqRow(order, metaEvent, dispatches, landingInfo, priceDiag) {
   const d = dispatches || {};
   const li = landingInfo || {};
   const noteAttrs = extractCartAttrs(order);
@@ -299,6 +298,7 @@ function buildBqRow(order, metaEvent, dispatches, landingInfo) {
     pinterest_response: d.pinterest ? JSON.stringify(d.pinterest).slice(0, 1000) : null,
     google_status: d.google ? (d.google.ok ? 'ok' : (d.google.skipped ? 'skipped' : 'fail')) : null,
     google_response: d.google ? JSON.stringify(d.google).slice(0, 1000) : null,
+    raw_price_diag: priceDiag || null,
   };
 }
 

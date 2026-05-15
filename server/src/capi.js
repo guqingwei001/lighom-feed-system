@@ -79,6 +79,28 @@ async function handleOrderWebhook(request, env) {
   // Shopline may wrap payload in {order:{...}} or send order directly
   const o = order.order || order;
 
+  // DIAG 5/15: one-shot trace of price fields to verify dollars-vs-cents.
+  // BQ orders.value shows real_price/100 — need to confirm whether Shopline
+  // top-level total_price is dollars (no /100 needed) or cents (current /100 right).
+  // Remove this block after one live order's payload is captured.
+  try {
+    const oil = (o.orderItemList || o.line_items || [])[0] || {};
+    console.log('PRICE_DIAG', JSON.stringify({
+      order_id: o.id || o.order_id || null,
+      current_total_price: o.current_total_price,
+      total_price: o.total_price,
+      totalPrice: o.totalPrice,
+      subtotal_price: o.subtotal_price,
+      grandTotal: o.grandTotal,
+      grand_total: o.grand_total,
+      currency: o.currency || o.presentment_currency,
+      line0_finalPrice: oil.finalPrice,
+      line0_price: oil.price,
+      line0_unit_price: oil.unit_price,
+      line0_quantity: oil.quantity,
+    }));
+  } catch (_) { /* never break webhook on diag */ }
+
   if (!env.META_PIXEL_ID || !env.META_CAPI_ACCESS_TOKEN) {
     return jsonResp(500, { ok: false, error: 'missing_secrets' });
   }

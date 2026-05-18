@@ -79,27 +79,6 @@ async function handleOrderWebhook(request, env) {
   // Shopline may wrap payload in {order:{...}} or send order directly
   const o = order.order || order;
 
-  // DIAG 5/15: one-shot trace of raw Shopline price fields. Written to
-  // orders.raw_price_diag so we don't depend on wrangler tail.
-  // Remove this block + column after one capture.
-  let priceDiag = null;
-  try {
-    const oil = (o.orderItemList || o.line_items || [])[0] || {};
-    priceDiag = JSON.stringify({
-      current_total_price: o.current_total_price,
-      total_price: o.total_price,
-      totalPrice: o.totalPrice,
-      subtotal_price: o.subtotal_price,
-      grandTotal: o.grandTotal,
-      grand_total: o.grand_total,
-      currency: o.currency || o.presentment_currency,
-      line0_finalPrice: oil.finalPrice,
-      line0_price: oil.price,
-      line0_unit_price: oil.unit_price,
-      line0_quantity: oil.quantity,
-    });
-  } catch (_) { priceDiag = 'DIAG_ERROR'; }
-
   if (!env.META_PIXEL_ID || !env.META_CAPI_ACCESS_TOKEN) {
     return jsonResp(500, { ok: false, error: 'missing_secrets' });
   }
@@ -143,7 +122,7 @@ async function handleOrderWebhook(request, env) {
 
   // Phase 2: write single BQ row containing actual statuses from all 3 platforms.
   // (Sequential after fanout adds ~150-200ms but gives full audit trail.)
-  const bqRow = buildBqRow(o, event, { meta, pinterest, google }, landingInfo, priceDiag);
+  const bqRow = buildBqRow(o, event, { meta, pinterest, google }, landingInfo);
   let bq;
   try {
     bq = env.GCP_SA_JSON
@@ -252,7 +231,7 @@ async function metaSend(endpoint, token, payload) {
 
 // Build BigQuery row matching the schema in DEPLOY.md Phase 9.
 // Uses already-computed Meta event for hash reuse where possible.
-function buildBqRow(order, metaEvent, dispatches, landingInfo, priceDiag) {
+function buildBqRow(order, metaEvent, dispatches, landingInfo) {
   const d = dispatches || {};
   const li = landingInfo || {};
   const noteAttrs = extractCartAttrs(order);
@@ -298,7 +277,6 @@ function buildBqRow(order, metaEvent, dispatches, landingInfo, priceDiag) {
     pinterest_response: d.pinterest ? JSON.stringify(d.pinterest).slice(0, 1000) : null,
     google_status: d.google ? (d.google.ok ? 'ok' : (d.google.skipped ? 'skipped' : 'fail')) : null,
     google_response: d.google ? JSON.stringify(d.google).slice(0, 1000) : null,
-    raw_price_diag: priceDiag || null,
   };
 }
 
@@ -397,10 +375,13 @@ async function buildMetaEvent(order, request, landingInfo) {
     category: String(li.product_category || li.customCategoryName || '').slice(0, 100),
   })).filter(c => c.id);
 
-  /* Shopline total_price is in cents → divide by 100 for Meta CAPI. */
-  const totalValue = Math.round((Number(
+  /* Shopline order.current_total_price is a DOLLARS string, NOT cents.
+     Verified 2026-05-18 via PRICE_DIAG on 8 live orders: raw "99.57" = real
+     $99.57 (the old /100 wrote $0.9957 to BQ + Meta). Do NOT divide by 100.
+     Note: orderItemList[].finalPrice IS cents (line ~372) — different field. */
+  const totalValue = Math.round(Number(
     order.current_total_price ?? order.total_price ?? order.totalPrice ?? order.subtotal_price ?? 0
-  ) / 100) * 100) / 100;
+  ) * 100) / 100 || 0;
 
   const customData = {
     currency: (order.currency || order.presentment_currency || 'USD').toUpperCase(),

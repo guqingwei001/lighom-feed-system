@@ -79,6 +79,31 @@ async function handleOrderWebhook(request, env) {
   // Shopline may wrap payload in {order:{...}} or send order directly
   const o = order.order || order;
 
+  // DIAG 5/19 (one-shot): capture raw Shopline referrer/source fields to fix
+  // Pinterest first-touch attribution (Shopline Referrer report shows Pinterest
+  // but BQ utm_source=meta_catalog because parseLandingAttribution prefers
+  // landing_site over referring_site). Written to orders.raw_referrer_diag.
+  // Read-only on `o`, never touches metaEvent → zero FB/Meta impact.
+  // Remove this block + column after 1-2 captures.
+  let referrerDiag = null;
+  try {
+    const cdet = o.client_details || o.clientDetails || {};
+    referrerDiag = JSON.stringify({
+      referring_site: o.referring_site,
+      referrer: o.referrer,
+      source_name: o.source_name,
+      source_identifier: o.source_identifier,
+      source_url: o.source_url,
+      landing_site: o.landing_site || o.landingSite,
+      cd_referrer: cdet.referrer,
+      cd_landing_site: cdet.landing_site || cdet.landingSite,
+      client_details_keys: Object.keys(cdet).slice(0, 20),
+      note_attrs: Array.isArray(o.note_attributes)
+        ? o.note_attributes.slice(0, 8)
+        : (o.note_attributes || null),
+    }).slice(0, 1800);
+  } catch (_) { referrerDiag = 'DIAG_ERR'; }
+
   if (!env.META_PIXEL_ID || !env.META_CAPI_ACCESS_TOKEN) {
     return jsonResp(500, { ok: false, error: 'missing_secrets' });
   }
@@ -122,7 +147,7 @@ async function handleOrderWebhook(request, env) {
 
   // Phase 2: write single BQ row containing actual statuses from all 3 platforms.
   // (Sequential after fanout adds ~150-200ms but gives full audit trail.)
-  const bqRow = buildBqRow(o, event, { meta, pinterest, google }, landingInfo);
+  const bqRow = buildBqRow(o, event, { meta, pinterest, google }, landingInfo, referrerDiag);
   let bq;
   try {
     bq = env.GCP_SA_JSON
@@ -231,7 +256,7 @@ async function metaSend(endpoint, token, payload) {
 
 // Build BigQuery row matching the schema in DEPLOY.md Phase 9.
 // Uses already-computed Meta event for hash reuse where possible.
-function buildBqRow(order, metaEvent, dispatches, landingInfo) {
+function buildBqRow(order, metaEvent, dispatches, landingInfo, referrerDiag) {
   const d = dispatches || {};
   const li = landingInfo || {};
   const noteAttrs = extractCartAttrs(order);
@@ -277,6 +302,7 @@ function buildBqRow(order, metaEvent, dispatches, landingInfo) {
     pinterest_response: d.pinterest ? JSON.stringify(d.pinterest).slice(0, 1000) : null,
     google_status: d.google ? (d.google.ok ? 'ok' : (d.google.skipped ? 'skipped' : 'fail')) : null,
     google_response: d.google ? JSON.stringify(d.google).slice(0, 1000) : null,
+    raw_referrer_diag: referrerDiag || null,
   };
 }
 

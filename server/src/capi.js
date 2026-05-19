@@ -54,6 +54,30 @@ export async function handleCapi(request, env, url) {
   if (url.pathname === '/capi/health') {
     return capiHealth(request, env, url);
   }
+  // Read-only dedup check for browser Purchase block (B): "has this order's
+  // Purchase already been sent?" Pure KV.get — never writes/deletes. fail-open:
+  // any error / missing oid / missing KV → {sent:false} so the browser fbq
+  // fires normally (never blocks/loses a real Purchase). Same kvKey scheme as
+  // events.js Layer-1 (`purchase_order_<order_id>`, 90d TTL written by /capi/event).
+  if (url.pathname === '/capi/purchase-check') {
+    const cors = {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, OPTIONS',
+      'Content-Type': 'application/json',
+    };
+    if (request.method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: cors });
+    }
+    const oid = url.searchParams.get('oid') || '';
+    let sent = false;
+    try {
+      if (oid && env.PURCHASE_DEDUP) {
+        const v = await env.PURCHASE_DEDUP.get(`purchase_order_${oid}`);
+        sent = !!v;
+      }
+    } catch (_) { /* fail-open: leave sent=false → browser fires normally */ }
+    return new Response(JSON.stringify({ sent }), { headers: cors });
+  }
   return new Response('Not Found', { status: 404 });
 }
 

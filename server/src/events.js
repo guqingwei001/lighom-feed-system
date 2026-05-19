@@ -177,11 +177,14 @@ export async function handleEvent(request, env) {
   // is skipped to keep EMQ scoring clean.
   const bot = detectBot(request);
 
-  // Layer-1 Purchase dedup: same order_id Purchase event fired multiple times
-  // (browser refresh / multi-tab / bot crawl of confirmation page / Purchase v8
-  // hijack bypass) — keep first, drop rest. KV TTL 24h covers email-link revisits.
-  // 5/9 production observation: LIG100131863 ($463.80) fired 5x in 35 minutes from
-  // 3 devices + 2 countries; LIG100131875 4x; LIG100131856 3x. All same-day same-order.
+  // Layer-1 Purchase dedup (ALL platforms: Meta+Pinterest+GA4 share isDuplicate gate):
+  // same order_id Purchase fired multiple times (refresh / multi-tab / bot crawl /
+  // owner re-opening real customers' thank-you pages across DAYS to test). Keep first,
+  // drop rest. 5/19: TTL 24h→90d — owner test-retests span many days (5/8–5/18 seen),
+  // 24h let cross-day retests through and re-inflate all 3 platforms. A given order_id
+  // only ever has ONE legitimate Purchase; any same order_id within 90d = duplicate,
+  // so longer TTL never blocks a real sale. 5/9 obs: LIG100131863 fired 5x/35min/3
+  // devices/2 countries; same-order repeats are the rule, not the exception.
   let isDuplicate = false;
   let dupFirstSeen = null;
   const orderIdForDedup = isPurchase && cd.order_id ? String(cd.order_id) : null;
@@ -193,7 +196,7 @@ export async function handleEvent(request, env) {
         isDuplicate = true;
         dupFirstSeen = prev;
       } else {
-        await env.PURCHASE_DEDUP.put(kvKey, new Date().toISOString(), { expirationTtl: 86400 });
+        await env.PURCHASE_DEDUP.put(kvKey, new Date().toISOString(), { expirationTtl: 7776000 });
       }
     } catch (e) {
       // KV outage should not block fanout — fail open

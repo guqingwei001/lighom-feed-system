@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     # Normal run: 30-60min. 90min gives ~50% buffer + faster auto-recovery on stuck runs
     # (e.g., Shopline API hang) — old 180min meant 3h dead time before next cron tick.
-    timeout-minutes: 90
+    timeout-minutes: 240
     env:
       # Opt into Node.js 24 for JS actions (Node 20 deprecation, Sep 2026)
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -31,6 +31,8 @@ jobs:
       - name: Generate Meta Feed
         env:
           SHOPLINE_API_TOKEN:    ${{ secrets.SHOPLINE_API_TOKEN }}
+          SHOPLINE_API_TOKEN_2:  ${{ secrets.SHOPLINE_API_TOKEN_2 }}
+          SHOPLINE_API_TOKEN_3:  ${{ secrets.SHOPLINE_API_TOKEN_3 }}
           SHOPLINE_DOMAIN:       ${{ secrets.SHOPLINE_DOMAIN }}
           R2_ACCESS_KEY_ID:      ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY:  ${{ secrets.R2_SECRET_ACCESS_KEY }}

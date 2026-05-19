@@ -21,6 +21,7 @@ import json
 import os
 import random
 import re
+import threading
 import time
 import urllib.request
 import urllib.error
@@ -37,8 +38,38 @@ def _api_base() -> str:
     return f'https://{domain}/admin/openapi/v20260901'
 
 
+_TOKENS: list[str] | None = None
+_tok_lock = threading.Lock()
+_tok_i = 0
+
+
+def _token_pool() -> list[str]:
+    """Collect all SHOPLINE_API_TOKEN[_2.._5] env vars. Single-token =
+    behaviour unchanged; extra tokens (different OAuth apps) multiply the
+    5 req/s per-app rate limit so the 15K pull scales near-linearly."""
+    global _TOKENS
+    if _TOKENS is None:
+        keys = ['SHOPLINE_API_TOKEN'] + [f'SHOPLINE_API_TOKEN_{i}' for i in range(2, 6)]
+        toks = []
+        for k in keys:
+            v = os.environ.get(k, '').strip()
+            if v and v not in toks:
+                toks.append(v)
+        _TOKENS = toks or [os.environ.get('SHOPLINE_API_TOKEN', '')]
+    return _TOKENS
+
+
+def _next_token() -> str:
+    global _tok_i
+    pool = _token_pool()
+    with _tok_lock:
+        t = pool[_tok_i % len(pool)]
+        _tok_i += 1
+    return t
+
+
 def _auth_headers() -> dict:
-    return {'Authorization': f'Bearer {os.environ["SHOPLINE_API_TOKEN"]}'}
+    return {'Authorization': f'Bearer {_next_token()}'}
 
 
 def discover_spu_ids() -> list[str]:
@@ -89,7 +120,7 @@ def _fetch_one(spu: str, retries: int = 8, timeout: float = 30) -> tuple[str, di
 
 
 def fetch_all_products(spu_ids: Iterable[str] | None = None,
-                      max_workers: int = 5) -> list[dict]:
+                      max_workers: int | None = None) -> list[dict]:
     """Fetch every product. Returns a list of Shopline product dicts.
 
     Two-pass strategy:
@@ -101,7 +132,13 @@ def fetch_all_products(spu_ids: Iterable[str] | None = None,
     if spu_ids is None:
         spu_ids = discover_spu_ids()
     spu_ids = list(spu_ids)
-    print(f'[shopline] fetching {len(spu_ids)} products with {max_workers} workers', flush=True)
+    # 5 workers per token: matches Shopline's ~5 req/s per-OAuth-app limit.
+    # 1 token → 5 (unchanged, safe). 3 tokens → 15 (~3x faster, ~20min pull).
+    n_tokens = len(_token_pool())
+    if max_workers is None:
+        max_workers = 5 * n_tokens
+    print(f'[shopline] fetching {len(spu_ids)} products with {max_workers} workers '
+          f'across {n_tokens} token(s)', flush=True)
 
     out, errors = [], []
     t0 = time.time()

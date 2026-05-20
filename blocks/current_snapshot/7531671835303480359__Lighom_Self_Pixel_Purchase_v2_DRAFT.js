@@ -61,17 +61,8 @@
       order_id: orderId
     };
 
-    /* raw PII from Shopline order (Worker hashes plain) — 提升 EMQ */
-    var rawEm = (buyer.buyerEmail || "").trim().toLowerCase();
-    var rawPh = (recv.receiverMobile || "").replace(/[^0-9]/g, "");
-    var rawFn = (buyer.buyerFirstName || recv.receiverFirstName || "").trim().toLowerCase();
-    var rawLn = (buyer.buyerLastName || recv.receiverLastName || "").trim().toLowerCase();
-    var rawCt = (recv.receiverCity || "").trim().toLowerCase().replace(/\s+/g, "");
-    var rawSt = (recv.receiverProvince || "").trim().toLowerCase().replace(/\s+/g, "");
-    var rawZp = (recv.receiverPostcode || "").trim().toLowerCase().split("-")[0];
-    var rawCountry = (recv.receiverCountryCode || "").trim().toLowerCase();
-    var rawExtId = String(buyer.buyerId || "") || ck(P + "external_id") || "";
-
+    /* 2026-05-20: removed rawEm/rawPh/etc dead-code declarations — never used in payload below.
+       PII comes only from window.LighomUtil.buildUserData() which reads _lighom_user_*_h cookies. */
     var ud = window.LighomUtil.buildUserData({prefix:P});
 
     function actuallyFire(){

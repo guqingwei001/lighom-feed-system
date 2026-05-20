@@ -61,7 +61,13 @@
     return ((document.querySelector("h1") || {}).textContent || document.title || "").trim().slice(0, 80);
   }
 
-  
+  /* P0 fix 2026-05-20: getIdsFromDOM was called by fire() line 71 but never defined →
+     ReferenceError when DL empty, killing the rest of fire(). Mirror FB VCat v2 implementation. */
+  function getIdsFromDOM(){
+    var m = document.body.innerHTML.match(/180689\d{18,20}/g);
+    if (!m) return [];
+    return Array.from(new Set(m)).slice(0, 30);
+  }
 
   var fired = false;
   function fire(){

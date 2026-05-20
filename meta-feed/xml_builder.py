@@ -2,6 +2,11 @@
 
 Output matches Meta's product catalog spec:
   https://developers.facebook.com/docs/marketing-api/catalog/reference/
+
+Two entry points:
+  build_meta_xml_to_file(items, path)  — streaming, low memory (preferred)
+  build_meta_xml(items)                — returns full string (kept for callers
+                                          that still want the bytes in memory)
 """
 from __future__ import annotations
 
@@ -14,91 +19,105 @@ def _cdata(text: str) -> str:
     return f'<![CDATA[{text}]]>'
 
 
-def build_meta_xml(items: list[dict], *, store_url: str = 'https://lighom.com') -> str:
-    """Serialise items into Meta-compatible RSS 2.0 XML string."""
-    out = []
-    out.append('<?xml version="1.0" encoding="UTF-8"?>\n')
-    out.append('<rss version="2.0" xmlns:g="http://base.google.com/ns/1.0">\n')
-    out.append('  <channel>\n')
-    out.append('    <title>Lighom — Meta Catalog Feed</title>\n')
-    out.append(f'    <link>{escape(store_url)}/</link>\n')
-    out.append('    <description>Optimized Lighom catalog feed for Meta DPA / ASC</description>\n')
+def build_meta_xml_to_file(items, path: str, *, store_url: str = 'https://lighom.com') -> None:
+    """Streaming variant: write directly to file, no full in-memory copy.
+    Avoids OOM on ubuntu-latest (7GB) when items list + accumulated string
+    + upstream products list would all live at once."""
+    with open(path, 'w', encoding='utf-8') as fp:
+        _emit(items, fp.write, store_url)
+
+
+def build_meta_xml(items, *, store_url: str = 'https://lighom.com') -> str:
+    """In-memory variant — kept for tests / callers that need the string.
+    Prefer build_meta_xml_to_file() for production large feeds."""
+    import io
+    buf = io.StringIO()
+    _emit(items, buf.write, store_url)
+    return buf.getvalue()
+
+
+def _emit(items, write, store_url: str) -> None:
+    write('<?xml version="1.0" encoding="UTF-8"?>\n')
+    write('<rss version="2.0" xmlns:g="http://base.google.com/ns/1.0">\n')
+    write('  <channel>\n')
+    write('    <title>Lighom — Meta Catalog Feed</title>\n')
+    write(f'    <link>{escape(store_url)}/</link>\n')
+    write('    <description>Optimized Lighom catalog feed for Meta DPA / ASC</description>\n')
 
     for it in items:
-        out.append('    <item>\n')
-        out.append(f'      <g:id>{escape(it["id"])}</g:id>\n')
-        out.append(f'      <g:item_group_id>{escape(it["item_group_id"])}</g:item_group_id>\n')
-        out.append(f'      <g:title>{_cdata(it["title"])}</g:title>\n')
-        out.append(f'      <g:description>{_cdata(it["description"])}</g:description>\n')
+        write('    <item>\n')
+        write(f'      <g:id>{escape(it["id"])}</g:id>\n')
+        write(f'      <g:item_group_id>{escape(it["item_group_id"])}</g:item_group_id>\n')
+        write(f'      <g:title>{_cdata(it["title"])}</g:title>\n')
+        write(f'      <g:description>{_cdata(it["description"])}</g:description>\n')
         if it.get('rich_text_description'):
-            out.append(f'      <g:rich_text_description>{_cdata(it["rich_text_description"])}</g:rich_text_description>\n')
-        out.append(f'      <g:link>{escape(it["link"])}</g:link>\n')
-        out.append(f'      <g:image_link>{escape(it["image_link"])}</g:image_link>\n')
+            write(f'      <g:rich_text_description>{_cdata(it["rich_text_description"])}</g:rich_text_description>\n')
+        write(f'      <g:link>{escape(it["link"])}</g:link>\n')
+        write(f'      <g:image_link>{escape(it["image_link"])}</g:image_link>\n')
         for u in it.get('additional_image_links', []):
-            out.append(f'      <g:additional_image_link>{escape(u)}</g:additional_image_link>\n')
+            write(f'      <g:additional_image_link>{escape(u)}</g:additional_image_link>\n')
         if it.get('lifestyle_image_link'):
-            out.append(f'      <g:lifestyle_image_link>{escape(it["lifestyle_image_link"])}</g:lifestyle_image_link>\n')
+            write(f'      <g:lifestyle_image_link>{escape(it["lifestyle_image_link"])}</g:lifestyle_image_link>\n')
 
-        out.append(f'      <g:availability>{it["availability"]}</g:availability>\n')
-        out.append(f'      <g:quantity_to_sell_on_facebook>{it["quantity_to_sell_on_facebook"]}</g:quantity_to_sell_on_facebook>\n')
-        out.append(f'      <g:condition>{it["condition"]}</g:condition>\n')
-        out.append(f'      <g:price>{it["price"]}</g:price>\n')
+        write(f'      <g:availability>{it["availability"]}</g:availability>\n')
+        write(f'      <g:quantity_to_sell_on_facebook>{it["quantity_to_sell_on_facebook"]}</g:quantity_to_sell_on_facebook>\n')
+        write(f'      <g:condition>{it["condition"]}</g:condition>\n')
+        write(f'      <g:price>{it["price"]}</g:price>\n')
         if it.get('sale_price'):
-            out.append(f'      <g:sale_price>{it["sale_price"]}</g:sale_price>\n')
-        out.append(f'      <g:brand>{escape(it["brand"])}</g:brand>\n')
-        out.append(f'      <g:identifier_exists>{it["identifier_exists"]}</g:identifier_exists>\n')
+            write(f'      <g:sale_price>{it["sale_price"]}</g:sale_price>\n')
+        write(f'      <g:brand>{escape(it["brand"])}</g:brand>\n')
+        write(f'      <g:identifier_exists>{it["identifier_exists"]}</g:identifier_exists>\n')
         if it.get('mpn'):
-            out.append(f'      <g:mpn>{escape(it["mpn"])}</g:mpn>\n')
+            write(f'      <g:mpn>{escape(it["mpn"])}</g:mpn>\n')
         if it.get('gtin'):
-            out.append(f'      <g:gtin>{escape(it["gtin"])}</g:gtin>\n')
+            write(f'      <g:gtin>{escape(it["gtin"])}</g:gtin>\n')
 
-        out.append(f'      <g:google_product_category>{escape(it["google_product_category"])}</g:google_product_category>\n')
+        write(f'      <g:google_product_category>{escape(it["google_product_category"])}</g:google_product_category>\n')
         if it.get('fb_product_category'):
-            out.append(f'      <g:fb_product_category>{escape(it["fb_product_category"])}</g:fb_product_category>\n')
+            write(f'      <g:fb_product_category>{escape(it["fb_product_category"])}</g:fb_product_category>\n')
         if it.get('language'):
-            out.append(f'      <g:language>{escape(it["language"])}</g:language>\n')
+            write(f'      <g:language>{escape(it["language"])}</g:language>\n')
         if it.get('product_type'):
-            out.append(f'      <g:product_type>{_cdata(it["product_type"])}</g:product_type>\n')
+            write(f'      <g:product_type>{_cdata(it["product_type"])}</g:product_type>\n')
 
         for fld in ('color', 'size', 'material', 'pattern'):
             v = it.get(fld)
             if v:
-                out.append(f'      <g:{fld}>{_cdata(v)}</g:{fld}>\n')
+                write(f'      <g:{fld}>{_cdata(v)}</g:{fld}>\n')
 
-        out.append(f'      <g:age_group>{it["age_group"]}</g:age_group>\n')
-        out.append(f'      <g:gender>{it["gender"]}</g:gender>\n')
+        write(f'      <g:age_group>{it["age_group"]}</g:age_group>\n')
+        write(f'      <g:gender>{it["gender"]}</g:gender>\n')
         if it.get('shipping_weight'):
-            out.append(f'      <g:shipping_weight>{it["shipping_weight"]}</g:shipping_weight>\n')
+            write(f'      <g:shipping_weight>{it["shipping_weight"]}</g:shipping_weight>\n')
 
         for cc in it.get('shipping_countries', []):
-            out.append('      <g:shipping>\n')
-            out.append(f'        <g:country>{cc}</g:country>\n')
-            out.append('        <g:service>Standard</g:service>\n')
-            out.append('        <g:price>0 USD</g:price>\n')
-            out.append('      </g:shipping>\n')
+            write('      <g:shipping>\n')
+            write(f'        <g:country>{cc}</g:country>\n')
+            write('        <g:service>Standard</g:service>\n')
+            write('        <g:price>0 USD</g:price>\n')
+            write('      </g:shipping>\n')
 
         for sec, attr, val in it.get('product_details', []):
-            out.append('      <g:product_detail>\n')
-            out.append(f'        <g:section_name>{escape(sec)}</g:section_name>\n')
-            out.append(f'        <g:attribute_name>{escape(attr)}</g:attribute_name>\n')
-            out.append(f'        <g:attribute_value>{_cdata(val)}</g:attribute_value>\n')
-            out.append('      </g:product_detail>\n')
+            write('      <g:product_detail>\n')
+            write(f'        <g:section_name>{escape(sec)}</g:section_name>\n')
+            write(f'        <g:attribute_name>{escape(attr)}</g:attribute_name>\n')
+            write(f'        <g:attribute_value>{_cdata(val)}</g:attribute_value>\n')
+            write('      </g:product_detail>\n')
 
         for h in it.get('product_highlights', []):
-            out.append(f'      <g:product_highlight>{_cdata(h)}</g:product_highlight>\n')
+            write(f'      <g:product_highlight>{_cdata(h)}</g:product_highlight>\n')
 
         for label, value in it.get('additional_variant_attributes', []):
-            out.append('      <g:additional_variant_attribute>\n')
-            out.append(f'        <g:label>{escape(label)}</g:label>\n')
-            out.append(f'        <g:value>{_cdata(value)}</g:value>\n')
-            out.append('      </g:additional_variant_attribute>\n')
+            write('      <g:additional_variant_attribute>\n')
+            write(f'        <g:label>{escape(label)}</g:label>\n')
+            write(f'        <g:value>{_cdata(value)}</g:value>\n')
+            write('      </g:additional_variant_attribute>\n')
 
         for i, val in enumerate(it.get('custom_labels', [])):
             if val:
-                out.append(f'      <g:custom_label_{i}>{_cdata(val)}</g:custom_label_{i}>\n')
+                write(f'      <g:custom_label_{i}>{_cdata(val)}</g:custom_label_{i}>\n')
 
-        out.append('    </item>\n')
+        write('    </item>\n')
 
-    out.append('  </channel>\n')
-    out.append('</rss>\n')
-    return ''.join(out)
+    write('  </channel>\n')
+    write('</rss>\n')

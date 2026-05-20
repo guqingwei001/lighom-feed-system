@@ -5,6 +5,7 @@ on a `ubuntu-latest` runner (most spent inside Shopline pagination).
 """
 from __future__ import annotations
 
+import gc
 import sys
 import time
 import urllib.request
@@ -16,7 +17,7 @@ from product_processor import (
     process_products, derive_cat_map_from_smart_feed_xml,
 )
 from r2_uploader import upload_feed, upload_log, get_last_variant_count
-from xml_builder import build_meta_xml
+from xml_builder import build_meta_xml_to_file
 from validator import validate
 
 LOCAL_XML = '/tmp/meta-feed.xml'
@@ -72,9 +73,14 @@ def main() -> int:
         items = process_products(products, cat_map=cat_map)
         print(f'[meta] generated {len(items)} catalog items', flush=True)
 
-        print('[meta] writing XML...', flush=True)
-        xml = build_meta_xml(items)
-        Path(LOCAL_XML).write_text(xml, encoding='utf-8')
+        # Free the huge products list (~15K dicts with full images arrays)
+        # before building the XML — main OOM driver on 7GB ubuntu-latest after
+        # v40 image rebuild restored full image arrays per SPU (5/17+ failures).
+        del products
+        gc.collect()
+
+        print('[meta] writing XML (streaming to file)...', flush=True)
+        build_meta_xml_to_file(items, LOCAL_XML)
 
         print('[meta] validating...', flush=True)
         v = validate(LOCAL_XML)

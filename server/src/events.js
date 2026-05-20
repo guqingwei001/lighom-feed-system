@@ -301,6 +301,41 @@ export async function handleEvent(request, env) {
     bq = { ok: false, error: String(err).slice(0, 300) };
   }
 
+  // serverEventId bridge: thank-you SEID Bridge block POSTs the Shopline
+  // __PRELOAD_STATE__.serverEventId + appOrderSeq here. Persist by appOrderSeq so
+  // the order webhook can set Meta event_id = serverEventId → dedups against native
+  // fbq Purchase (which uses serverEventId). Fail-open, additive.
+  try {
+    if (body.event_name === 'SEIDCapture' && cd.order_id && cd.seid && env.PURCHASE_DEDUP) {
+      await env.PURCHASE_DEDUP.put(`seid_${cd.order_id}`, String(cd.seid), { expirationTtl: 2592000 });
+    }
+  } catch (e) {
+    console.error('seid put error:', String(e).slice(0, 140));
+  }
+
+  // EMQ context source for the order webhook. Funnel events read fbp/fbc/ip/ua
+  // late in the funnel (after Capture/Enricher mint) so they carry these reliably,
+  // unlike buy-now/express orders whose webhook lacks browser context. Persist by
+  // hashed email (same sha256(lowercase+trim) the webhook computes → keys align)
+  // so capi.js /capi/order can backfill missing identifiers. Additive + fail-open:
+  // never alters this event's own send; KV error is swallowed.
+  try {
+    const emH = arr0(userData.em);
+    const FUNNEL_EMQ = new Set(['InitiateCheckout', 'AddPaymentInfo', 'AddToCart', 'ViewContent']);
+    if (emH && userData.fbp && FUNNEL_EMQ.has(body.event_name) && env.PURCHASE_DEDUP && !bot.is_bot) {
+      await env.PURCHASE_DEDUP.put(`emqctx_${emH}`, JSON.stringify({
+        fbp: userData.fbp || '',
+        fbc: userData.fbc || '',
+        ip: userData.client_ip_address || '',
+        ua: userData.client_user_agent || '',
+        xid: arr0(userData.external_id) || '',
+        t: Date.now(),
+      }), { expirationTtl: 2592000 });
+    }
+  } catch (e) {
+    console.error('emqctx put error:', String(e).slice(0, 160));
+  }
+
   return jsonResp(200, {
     ok: meta.ok || pinterest.ok || google.ok,
     meta, pinterest, google, bigquery: bq,

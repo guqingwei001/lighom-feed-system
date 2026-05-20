@@ -140,6 +140,55 @@ async function handleOrderWebhook(request, env) {
 
   const event = await buildMetaEvent(o, request, landingInfo);
 
+  // EMQ backfill: buy-now / express orders frequently miss browser context in the
+  // webhook (cart-attr injector bypassed → no _fbp/_fbc/_ua note attrs, no clientDetails).
+  // Restore fbp/fbc/client_ip/client_ua from the buyer's funnel-event KV, keyed by
+  // hashed email (events.js writes emqctx_<emHash> on IC/AddPaymentInfo/ATC/VC, which
+  // carry these reliably). Only fills MISSING fields; fully fail-open — any error
+  // leaves the original event untouched. Measured gap: fbc 66.7% / fbp 75% / ip-ua 69%.
+  try {
+    const ud = event.user_data || {};
+    const emH = Array.isArray(ud.em) ? ud.em[0] : ud.em;
+    if (emH && env.PURCHASE_DEDUP) {
+      const raw = await env.PURCHASE_DEDUP.get(`emqctx_${emH}`);
+      if (raw) {
+        const c = JSON.parse(raw);
+        if (!ud.fbp && c.fbp) ud.fbp = c.fbp;
+        if (!ud.fbc && c.fbc) ud.fbc = c.fbc;
+        if (!ud.client_ip_address && c.ip) ud.client_ip_address = c.ip;
+        if (!ud.client_user_agent && c.ua) ud.client_user_agent = c.ua;
+        // Identity unification: append the browser funnel's hashed external_id
+        // (Enricher device UUID used by logged-out VC/ATC/IC) so the Purchase
+        // connects to that funnel. Multi-value external_id — the Shopline
+        // customer.id element is kept, never removed. Strictly additive.
+        if (c.xid) {
+          const cur = Array.isArray(ud.external_id)
+            ? ud.external_id.slice()
+            : (ud.external_id ? [ud.external_id] : []);
+          if (cur.indexOf(c.xid) === -1) cur.push(c.xid);
+          ud.external_id = cur;
+        }
+        event.user_data = ud;
+      }
+    }
+  } catch (_) { /* fail-open: keep original event exactly as built */ }
+
+  // serverEventId bridge: when event_id is the `purchase_<seq>` fallback (no
+  // serverEventId in the webhook payload), substitute the serverEventId captured
+  // by the thank-you SEID Bridge block (KV seid_<appOrderSeq>). This makes the
+  // CAPI Purchase event_id == native fbq Purchase eid → Meta dedups native↔CAPI.
+  // Only touches the fallback id (never an explicit order.server_event_id);
+  // fail-open — any miss/error keeps the current `purchase_<seq>` id (no regression).
+  try {
+    if (env.PURCHASE_DEDUP && /^purchase_/.test(event.event_id)) {
+      const seq = event.event_id.replace(/^purchase_/, '');
+      if (seq) {
+        const seid = await env.PURCHASE_DEDUP.get(`seid_${seq}`);
+        if (seid) event.event_id = seid;
+      }
+    }
+  } catch (_) { /* fail-open: keep fallback event_id */ }
+
   const apiVersion = env.META_API_VERSION || META_API_VERSION_DEFAULT;
   const endpoint = `https://graph.facebook.com/${apiVersion}/${env.META_PIXEL_ID}/events`;
   const payload = { data: [event] };

@@ -38,6 +38,13 @@
     return origPush.apply(this, arguments);
   };
 
+  /* 2026-05-20: v2 pintrk hijack disabled for 24h verify cycle.
+     Hypothesis: User Data Enricher v10's pintrk hijack v3 (inner-wrapper, overwrites
+     event_id last) makes this hijack dead code. After 24h, if Pinterest event_id dedup
+     metrics unchanged → truly delete this block below. If Pinterest dedup BREAKS (would
+     mean Enricher load order shifted or Enricher disabled), revert by removing return. */
+  return;
+
   /* ====== v2 NEW: pintrk hijack ====== */
   if (window.__lighom_pintrk_hijacked_v2) return;
 

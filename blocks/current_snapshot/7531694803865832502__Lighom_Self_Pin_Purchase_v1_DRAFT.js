@@ -72,47 +72,73 @@
     /* event_id: 与 FB Purchase v2 同(SEID prefix or canonical) — Q5 锁:Phase F 才切纯 canonical */
     var event_id = ("purchase_" + orderId);
 
-    /* 2026-05-20: removed rawEm/rawPh/etc dead-code declarations — never used in payload below.
-       PII comes only from window.LighomUtil.buildUserData() which reads _lighom_user_*_h cookies. */
+    /* 2026-05-20 V2: PII from cookies + buyer.email/phone async SHA256 backfill from
+       PRELOAD_STATE.orders.buyerInfo/receiverInfo. 修 em=0% on thank-you (cookie 缺). */
     var ud = window.LighomUtil.buildUserData({prefix:P});
+    function _sha256Hex(s){
+      if (!s) return Promise.resolve('');
+      var enc = new TextEncoder().encode(String(s));
+      return crypto.subtle.digest('SHA-256', enc).then(function(buf){
+        return Array.from(new Uint8Array(buf)).map(function(b){return b.toString(16).padStart(2,'0');}).join('');
+      });
+    }
+    var rawEm = String(buyer.email || '').trim().toLowerCase();
+    var rawPh = String(buyer.phone || recv.phone || '').replace(/\D/g, '');
+    var rawFn = String(recv.firstName || recv.first_name || buyer.firstName || '').trim().toLowerCase();
+    var rawLn = String(recv.lastName || recv.last_name || buyer.lastName || '').trim().toLowerCase();
+    var udReady = Promise.all([
+      (rawEm && !ud.em) ? _sha256Hex(rawEm) : Promise.resolve(''),
+      (rawPh && !ud.ph) ? _sha256Hex(rawPh) : Promise.resolve(''),
+      (rawFn && !ud.fn) ? _sha256Hex(rawFn) : Promise.resolve(''),
+      (rawLn && !ud.ln) ? _sha256Hex(rawLn) : Promise.resolve('')
+    ]).then(function(hs){
+      if (hs[0]) ud.em = hs[0];
+      if (hs[1]) ud.ph = hs[1];
+      if (hs[2]) ud.fn = hs[2];
+      if (hs[3]) ud.ln = hs[3];
+    }).catch(function(e){
+      window.LighomUtil&&window.LighomUtil.logErr&&window.LighomUtil.logErr("Pin Purchase v1",e);
+    });
 
     function actuallyFire(){
-      /* Pinterest checkout: line_items + value + currency + order_id + event_id */
-      try {
-        if (window.pintrk) window.pintrk("track", "checkout", {
-          value: Math.round(value * 100) / 100,
-          currency: currency,
-          order_id: orderId,
-          line_items: line_items,
-          event_id: event_id
-        });
-      } catch(e){window.LighomUtil&&window.LighomUtil.logErr&&window.LighomUtil.logErr("Pin Purchase v1",e);}
-      try {
-        fetch(WORKER, {
-          method: "POST", credentials: "omit", keepalive: true,
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            event_name: "Purchase", event_id: event_id,
-            event_time: Math.floor(Date.now()/1000),
-            event_source_url: location.href, page_url: location.href, page_path: location.pathname,
-            page_type: "thank_you",
-            fanout: ["pinterest"],
-            utm: { source: ck("last_utm_source")||ck("first_utm_source")||"", medium: ck("last_utm_medium")||ck("first_utm_medium")||"", campaign: ck("last_utm_campaign")||ck("first_utm_campaign")||"" },
-            user_data: ud,
-            custom_data: {
-              content_type: "product",
-              content_ids: content_ids,
-              contents: contents,
-              currency: currency,
-              value: Math.round(value * 100) / 100,
-              num_items: num_items,
-              order_id: orderId,
-              data_quality: "self_pin_v1:purchase"
-            }
-          })
-        });
-      } catch(e){window.LighomUtil&&window.LighomUtil.logErr&&window.LighomUtil.logErr("Pin Purchase v1",e);}
-      try { localStorage.setItem(KEY, String(Date.now())); } catch(e){window.LighomUtil&&window.LighomUtil.logErr&&window.LighomUtil.logErr("Pin Purchase v1",e);}
+      udReady.then(function(){
+        /* Pinterest checkout: line_items + value + currency + order_id + event_id */
+        try {
+          if (window.pintrk) window.pintrk("track", "checkout", {
+            value: Math.round(value * 100) / 100,
+            currency: currency,
+            order_id: orderId,
+            line_items: line_items,
+            event_id: event_id
+          });
+        } catch(e){window.LighomUtil&&window.LighomUtil.logErr&&window.LighomUtil.logErr("Pin Purchase v1",e);}
+        try {
+          fetch(WORKER, {
+            method: "POST", credentials: "omit", keepalive: true,
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              event_name: "Purchase", event_id: event_id,
+              event_time: Math.floor(Date.now()/1000),
+              event_source_url: location.href, page_url: location.href, page_path: location.pathname,
+              page_type: "thank_you",
+              fanout: ["pinterest"],
+              utm: { source: ck("last_utm_source")||ck("first_utm_source")||"", medium: ck("last_utm_medium")||ck("first_utm_medium")||"", campaign: ck("last_utm_campaign")||ck("first_utm_campaign")||"" },
+              user_data: ud,
+              custom_data: {
+                content_type: "product",
+                content_ids: content_ids,
+                contents: contents,
+                currency: currency,
+                value: Math.round(value * 100) / 100,
+                num_items: num_items,
+                order_id: orderId,
+                data_quality: "self_pin_v1:purchase"
+              }
+            })
+          });
+        } catch(e){window.LighomUtil&&window.LighomUtil.logErr&&window.LighomUtil.logErr("Pin Purchase v1",e);}
+        try { localStorage.setItem(KEY, String(Date.now())); } catch(e){window.LighomUtil&&window.LighomUtil.logErr&&window.LighomUtil.logErr("Pin Purchase v1",e);}
+      });
     }
     var checks = 0;
     function waitPin(){

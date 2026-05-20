@@ -365,7 +365,7 @@ function buildBqRow(order, metaEvent, dispatches, landingInfo, referrerDiag) {
     fbclid: li.fbclid || null,
     pins_campaign_id: li.pins_campaign_id || null,
     landing_url: li.landingUrl || null,
-    data_quality: classifyTestRow(order) ? 'test' : null,
+    data_quality: classifyTestRow(order) ? 'test' : ('webhook:' + (metaEvent.event_name || 'unknown').toLowerCase()),
     country: arr0(ud.country),
     city_hashed: arr0(ud.ct),
     // Actual statuses from all 3 ad-network dispatches (sequential write).

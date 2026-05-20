@@ -17,12 +17,27 @@
   
   
 
+  /* 2026-05-20: order-age gate — prevent revisit-triggers on old orders.
+     Customer accessing /orders/<id> URL from Account → My Orders re-renders thank-you;
+     block previously fired假 Purchase events to Meta when localStorage lock not yet set
+     (e.g., when block first goes Live, every old paid order user opens triggers once).
+     Gate: skip if order paid > 48h ago. Reads basic.{payTime,paidAt,createdAt,transTime}
+     as ms or sec. If no timestamp field → fire (defensive default for unknown schema). */
+  function _staleOrderMs(basic){
+    var ts = (basic && (basic.payTime || basic.paidAt || basic.createdAt || basic.transTime)) || 0;
+    var ms = typeof ts === "number" ? ts : (ts ? new Date(ts).getTime() : 0);
+    if (!ms || isNaN(ms)) return 0;
+    if (ms < 1e12) ms = ms * 1000; /* sec → ms */
+    return Date.now() - ms;
+  }
   function tryFire(){
     var ps = window.__PRELOAD_STATE__;
     var orders = ps && ps.orders;
     var basic = orders && orders.basicInfo;
     if (!basic || !basic.orderSeq) return false;
     if (basic.financialStatus !== "paid") return true;
+    var ageMs = _staleOrderMs(basic);
+    if (ageMs > 48 * 3600 * 1000) return true; /* > 48h = revisit, not fresh purchase */
     var orderSeq = basic.orderSeq;
     var orderId = basic.appOrderSeq || orderSeq;
     var KEY = "__lighom_selfpx_purchase_v2_" + orderSeq;

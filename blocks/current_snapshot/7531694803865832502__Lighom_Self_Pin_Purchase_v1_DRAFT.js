@@ -17,12 +17,26 @@
   
   
 
+  /* 2026-05-20: order-age gate — prevent revisit-triggers on old orders.
+     Pin v1 just went Live, every old paid order user opens triggers假 Purchase to
+     Pinterest (no localStorage lock from prior visits). Gate: skip if paid > 48h ago.
+     Reads basic.{payTime,paidAt,createdAt,transTime} as ms or sec. If no timestamp
+     field → fire (defensive default). */
+  function _staleOrderMs(basic){
+    var ts = (basic && (basic.payTime || basic.paidAt || basic.createdAt || basic.transTime)) || 0;
+    var ms = typeof ts === "number" ? ts : (ts ? new Date(ts).getTime() : 0);
+    if (!ms || isNaN(ms)) return 0;
+    if (ms < 1e12) ms = ms * 1000;
+    return Date.now() - ms;
+  }
   function tryFire(){
     var ps = window.__PRELOAD_STATE__;
     var orders = ps && ps.orders;
     var basic = orders && orders.basicInfo;
     if (!basic || !basic.orderSeq) return false;
     if (basic.financialStatus !== "paid") return true;
+    var ageMs = _staleOrderMs(basic);
+    if (ageMs > 48 * 3600 * 1000) return true; /* > 48h = revisit, not fresh purchase */
     var orderSeq = basic.orderSeq;
     var orderId = basic.appOrderSeq || orderSeq;
     var KEY = "__lighom_selfpin_purchase_v1_" + orderSeq;

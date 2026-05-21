@@ -392,6 +392,15 @@ function buildBqRow(order, metaEvent, dispatches, landingInfo, referrerDiag) {
     data_quality: classifyTestRow(order) ? 'test' : ('webhook:' + (metaEvent.event_name || 'unknown').toLowerCase()),
     country: arr0(ud.country),
     city_hashed: arr0(ud.ct),
+    // [2026-05-21] PII field presence monitoring — mirror of events.js engagements;
+    // tracks which user_data fields the webhook successfully assembled for EMQ analysis.
+    ph_present: !!arr0(ud.ph),
+    fn_present: !!arr0(ud.fn),
+    ln_present: !!arr0(ud.ln),
+    ct_present: !!arr0(ud.ct),
+    st_present: !!arr0(ud.st),
+    zp_present: !!arr0(ud.zp),
+    country_present: !!arr0(ud.country),
     // Actual statuses from all 3 ad-network dispatches (sequential write).
     meta_capi_status: d.meta ? (d.meta.ok ? 'ok' : (d.meta.skipped ? 'skipped' : 'fail')) : null,
     meta_capi_response: d.meta ? JSON.stringify(d.meta).slice(0, 1000) : null,

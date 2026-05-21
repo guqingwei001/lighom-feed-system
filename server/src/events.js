@@ -299,6 +299,16 @@ export async function handleEvent(request, env) {
     page_path: body.page_path || null,
     user_id: ud.external_id ? String(ud.external_id) : null,
     email_hashed: arr0(userData.em),
+    // [2026-05-21] PII field presence monitoring (BQ doesn't store the hashes
+    // themselves to keep PII surface small + storage cheap; just bool flags so
+    // we can measure EMQ field coverage from BQ without rounding-trip to Meta).
+    ph_present: !!arr0(userData.ph),
+    fn_present: !!arr0(userData.fn),
+    ln_present: !!arr0(userData.ln),
+    ct_present: !!arr0(userData.ct),
+    st_present: !!arr0(userData.st),
+    zp_present: !!arr0(userData.zp),
+    country_present: !!(userData.country && (Array.isArray(userData.country) ? userData.country[0] : userData.country)),
     fbc: ud.fbc || null,
     fbp: ud.fbp || null,
     epik: ud.epik || null,

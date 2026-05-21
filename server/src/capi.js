@@ -173,6 +173,30 @@ async function handleOrderWebhook(request, env) {
     }
   } catch (_) { /* fail-open: keep original event exactly as built */ }
 
+  // [2026-05-21] Webhook Purchase writes the emqctx_xid_<extid> index too.
+  // Shopline-side order has the canonical em/ph/fn/ln/geo (most authoritative).
+  // Storing these by extid lets future PV/VC/ATC from the same logged-in customer
+  // (or same device UUID if Worker received it via cart_attrs earlier) backfill em.
+  // Customer-PII only — no order_id / value / product_id in the index value.
+  try {
+    const ud = event.user_data || {};
+    const xid = Array.isArray(ud.external_id) ? ud.external_id[0] : ud.external_id;
+    const emH = Array.isArray(ud.em) ? ud.em[0] : ud.em;
+    if (xid && emH && env.PURCHASE_DEDUP) {
+      await env.PURCHASE_DEDUP.put(`emqctx_xid_${xid}`, JSON.stringify({
+        em: emH,
+        ph: Array.isArray(ud.ph) ? ud.ph[0] : (ud.ph || ''),
+        fn: Array.isArray(ud.fn) ? ud.fn[0] : (ud.fn || ''),
+        ln: Array.isArray(ud.ln) ? ud.ln[0] : (ud.ln || ''),
+        ct: Array.isArray(ud.ct) ? ud.ct[0] : (ud.ct || ''),
+        st: Array.isArray(ud.st) ? ud.st[0] : (ud.st || ''),
+        zp: Array.isArray(ud.zp) ? ud.zp[0] : (ud.zp || ''),
+        country: Array.isArray(ud.country) ? ud.country[0] : (ud.country || ''),
+        t: Date.now(),
+      }), { expirationTtl: 2592000 });
+    }
+  } catch (_) { /* fail-open: index write failure is non-critical, event still fires */ }
+
   // serverEventId bridge: when event_id is the `purchase_<seq>` fallback (no
   // serverEventId in the webhook payload), substitute the serverEventId captured
   // by the thank-you SEID Bridge block (KV seid_<appOrderSeq>). This makes the

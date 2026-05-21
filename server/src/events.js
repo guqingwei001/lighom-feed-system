@@ -95,6 +95,43 @@ export async function handleEvent(request, env) {
   const cfIp = request.headers.get('CF-Connecting-IP') || request.headers.get('X-Real-IP') || '';
   if (cfIp) userData.client_ip_address = cfIp;
 
+  // [2026-05-21] EMQ enrichment by external_id — upper-funnel events (PV/VC/VCat/ATC)
+  // usually lack em/ph/fn/ln/geo because the customer hasn't entered them yet at that
+  // point. If we've previously stored these for the same external_id (from a later
+  // IC/APInfo/Purchase in this OR a prior session), backfill them here so all events
+  // can score full EMQ. Keyed by external_id (logged-in: Shopline customer.id stable
+  // across devices; logged-out: Enricher device UUID stable per browser).
+  // Strictly additive — only fills MISSING fields, never overwrites priority sources.
+  // ⚠️ Customer-identity only: em/ph/fn/ln/ct/st/zp/country. Product/value/order_id
+  // NEVER cross-pollinated between events (different conversion context).
+  try {
+    const xidLookup = Array.isArray(userData.external_id) && userData.external_id.length
+      ? userData.external_id[0]
+      : (typeof userData.external_id === 'string' ? userData.external_id : '');
+    const needsEnrich = xidLookup && (!userData.em || !userData.ph || !userData.fn || !userData.ln || !userData.ct);
+    if (needsEnrich && env.PURCHASE_DEDUP) {
+      const raw = await env.PURCHASE_DEDUP.get(`emqctx_xid_${xidLookup}`);
+      if (raw) {
+        const c = JSON.parse(raw);
+        // Recency gate: even though KV TTL = 30d, the user-id identity drift risk
+        // (shared accounts, family member buys for parent etc.) compounds over time.
+        // 90d ceiling on the *value* timestamp is a second-layer guard; KV TTL alone
+        // could be reset to 180d later by mistake and this still holds.
+        const ageMs = c.t ? Date.now() - Number(c.t) : 0;
+        if (ageMs >= 0 && ageMs <= 90 * 24 * 3600 * 1000) {
+          if (!userData.em && c.em) userData.em = [c.em];
+          if (!userData.ph && c.ph) userData.ph = [c.ph];
+          if (!userData.fn && c.fn) userData.fn = [c.fn];
+          if (!userData.ln && c.ln) userData.ln = [c.ln];
+          if (!userData.ct && c.ct) userData.ct = [c.ct];
+          if (!userData.st && c.st) userData.st = [c.st];
+          if (!userData.zp && c.zp) userData.zp = [c.zp];
+          if (!userData.country && c.country) userData.country = c.country;
+        }
+      }
+    }
+  } catch (_) { /* fail-open: any KV error keeps event as-is */ }
+
   const customData = {};
   if (cd.product_id) customData.content_ids = [String(cd.product_id)];
   if (Array.isArray(cd.content_ids)) customData.content_ids = cd.content_ids.map(String);
@@ -335,6 +372,17 @@ export async function handleEvent(request, env) {
   } catch (e) {
     console.error('emqctx put error:', String(e).slice(0, 160));
   }
+
+  // [2026-05-21] Browser-side xid WRITE intentionally NOT done here.
+  // events.js cannot distinguish (post-hash) whether the incoming extid is a
+  // Shopline customer.id (server-verified person) or an Enricher device UUID
+  // (browser-scoped, vulnerable to shared-device identity drift). Writing from
+  // here would store Person A's em under a device UUID — next anonymous browser
+  // session from Person B on same device would inherit A's em on PV (identity
+  // mis-attribution). Index writes are restricted to capi.js webhook path which
+  // uses order.customer.id (Shopline-side, always real). Result: only logged-in
+  // returning customers (extid == customer.id) hit the index; anonymous device
+  // UUIDs never match → no false enrichment.
 
   return jsonResp(200, {
     ok: meta.ok || pinterest.ok || google.ok,

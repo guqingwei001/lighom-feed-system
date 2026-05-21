@@ -120,35 +120,12 @@
       return 'ok';
     } catch(e){ return 'rewrite_failed'; }
   }
-  /* Telemetry dedup: cross-pageload via sessionStorage so refresh/SPA-nav doesn't re-send
-     identical (event_name, status) telemetry. ~5x BQ row reduction vs in-memory dedup. */
+  /* [2026-05-21] Telemetry DISABLED — hijack 已稳定 (5/13 起 100% rewrite_status=ok),
+     940/d BQ 行只是噪音 + Worker 调用浪费 ($/quota)。保留函数签名 + 调用位置(makeWrapper
+     里),需要恢复调试时删掉下面 return 行即可。其它子系统不动。
+     回滚:删除下一行 return,函数自动恢复发 BQ。 */
   function reportPinterestHijackTelemetry(eventName, status, sharedid){
-    var dedupKey = String(eventName||'') + '|' + String(status||'');
-    var TELE_KEY = '__lighom_pintrk_telemetry_sent';
-    var sent = {};
-    try { sent = JSON.parse(sessionStorage.getItem(TELE_KEY) || '{}') || {}; } catch(e){}
-    if (sent[dedupKey]) return;
-    sent[dedupKey] = 1;
-    try { sessionStorage.setItem(TELE_KEY, JSON.stringify(sent)); } catch(e){}
-    try {
-      fetch('https://lighom-feed-server.dikecarmem750.workers.dev/capi/event', {
-        method: 'POST', credentials: 'omit', keepalive: true,
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({
-          event_name: 'PinterestHijackTelemetry',
-          event_id: 'pinhij_' + Date.now() + '_' + Math.random().toString(36).slice(2,8),
-          page_url: location.href, page_path: location.pathname,
-          page_type: 'engagement',
-          fanout: [],  /* BQ-only — no Meta/Pinterest/GA4 platform send */
-          user_data: {
-            fbp: ck('_fbp'), fbc: ck('_fbc'),
-            external_id: (window.__lighom_user_data_raw && window.__lighom_user_data_raw.external_id) || ''
-          },
-          custom_data: { content_type: 'telemetry', pintrk_event: String(eventName||''), hijack_status: status, sharedid_used: sharedid || '' },
-          data_quality: 'pin_hijack:' + status
-        })
-      }).catch(function(){});
-    } catch(e){}
+    return; /* DISABLED 2026-05-21 — restore by removing this line */
   }
   var __pinHijackEnabled = shouldHijackPintrk();
 

@@ -109,9 +109,18 @@ async function handleOrderWebhook(request, env) {
   // landing_site over referring_site). Written to orders.raw_referrer_diag.
   // Read-only on `o`, never touches metaEvent → zero FB/Meta impact.
   // Remove this block + column after 1-2 captures.
+  //
+  // DIAG 5/22 (one-shot): also capture the webhook order's recipient nesting.
+  // admin API + thank-you __PRELOAD_STATE__ both expose receiverInfo.receiver*,
+  // but the webhook is a 3rd surface — its exact key/casing is unconfirmed, so
+  // fn/ln/ct/st/zp/country are 0% on every webhook Purchase. `addr_diag` reveals
+  // the real shape so buildMetaEvent's receiver fallback can be finalized.
+  // Read-only; remove this block + the addr_diag key after 1-2 captures.
   let referrerDiag = null;
   try {
     const cdet = o.client_details || o.clientDetails || {};
+    const recvCand = o.receiverInfo || o.receiver_info || o.receiver
+      || o.shipping_address || o.shippingAddress || null;
     referrerDiag = JSON.stringify({
       referring_site: o.referring_site,
       referrer: o.referrer,
@@ -125,7 +134,28 @@ async function handleOrderWebhook(request, env) {
       note_attrs: Array.isArray(o.note_attributes)
         ? o.note_attributes.slice(0, 8)
         : (o.note_attributes || null),
-    }).slice(0, 1800);
+      // DIAG 5/22 — recipient-shape capture
+      addr_diag: {
+        o_keys: Object.keys(o).slice(0, 60),
+        customer_keys: o.customer ? Object.keys(o.customer).slice(0, 30) : null,
+        recv_key_used: o.receiverInfo ? 'receiverInfo'
+          : o.receiver_info ? 'receiver_info'
+          : o.receiver ? 'receiver'
+          : o.shipping_address ? 'shipping_address'
+          : o.shippingAddress ? 'shippingAddress' : null,
+        recv_obj: recvCand ? Object.keys(recvCand).slice(0, 40) : null,
+        recv_sample: recvCand ? {
+          fn: recvCand.receiverFirstName ?? recvCand.first_name ?? null,
+          ln: recvCand.receiverLastName ?? recvCand.last_name ?? null,
+          ct: recvCand.receiverCity ?? recvCand.city ?? null,
+          st: recvCand.receiverProvinceCode ?? recvCand.receiverProvince
+            ?? recvCand.province_code ?? recvCand.province ?? null,
+          zp: recvCand.receiverPostcode ?? recvCand.zip ?? null,
+          cc: recvCand.receiverCountryCode ?? recvCand.country_code
+            ?? recvCand.country ?? null,
+        } : null,
+      },
+    }).slice(0, 3000);
   } catch (_) { referrerDiag = 'DIAG_ERR'; }
 
   if (!env.META_PIXEL_ID || !env.META_CAPI_ACCESS_TOKEN) {
@@ -241,6 +271,24 @@ async function handleOrderWebhook(request, env) {
   const meta = settledOr(metaSettled);
   const pinterest = settledOr(pinterestSettled);
   const google = settledOr(ga4Settled);
+
+  // [2026-05-22] Write purchase_order_<seq> KV so browser revisit Purchase fires
+  // (which call /capi/event with same order_id) hit events.js Layer-1 dedup and
+  // skip fanout. Without this, 4/26 orders since 5/1 had browser fires > 7d after
+  // order placement → outside Meta event_id dedup window → Meta double-counted.
+  // 90d TTL matches events.js. Conditioned on any dispatch ok so a total Worker
+  // failure leaves KV unwritten and browser can still recover. Fail-open on KV err.
+  try {
+    const anyOk = (meta && meta.ok) || (pinterest && pinterest.ok) || (google && google.ok);
+    const dedupSeq = String(o.name || o.app_order_seq || o.appOrderSeq || '').replace(/^#/, '');
+    if (anyOk && dedupSeq && env.PURCHASE_DEDUP) {
+      await env.PURCHASE_DEDUP.put(
+        `purchase_order_${dedupSeq}`,
+        new Date().toISOString(),
+        { expirationTtl: 7776000 }
+      );
+    }
+  } catch (_) { /* KV outage non-fatal — fanout already delivered */ }
 
   // Phase 2: write single BQ row containing actual statuses from all 3 platforms.
   // (Sequential after fanout adds ~150-200ms but gives full audit trail.)
@@ -373,6 +421,7 @@ function buildBqRow(order, metaEvent, dispatches, landingInfo, referrerDiag) {
     order_id: String(order.id || order.order_id || ''),
     user_id: String(customer.id || customer.user_id || order.user_id || ''),
     email_hashed: arr0(ud.em),
+    external_id: arr0(ud.external_id),
     phone_hashed: arr0(ud.ph),
     fbc: ud.fbc || null,
     fbp: ud.fbp || null,
@@ -446,20 +495,27 @@ async function buildMetaEvent(order, request, landingInfo) {
   const shippingAddr = order.shipping_address || order.shippingAddress || customer.default_address || {};
   const billingAddr = order.billing_address || order.billingAddress || {};
   const clientDetails = order.client_details || order.clientDetails || {};
+  // Shopline's order payload carries the recipient as `receiverInfo` (camelCase,
+  // confirmed 2026-05-22 against the admin order API): receiverFirstName /
+  // receiverLastName / receiverCountryCode / receiverCity / receiverProvince(Code)
+  // / receiverPostcode / receiverMobile. The Shopify-style shipping_address.* keys
+  // above are never populated by this webhook → fn/ln/ct/st/zp/country were 0% on
+  // every webhook Purchase. recv is consulted as a fallback only — purely additive.
+  const recv = order.receiverInfo || order.receiver_info || order.receiver || {};
 
-  const email = (order.email || customer.email || '').toLowerCase().trim();
-  const phone = normPhone(order.phone || customer.phone || shippingAddr.phone || '');
-  const firstName = (shippingAddr.first_name || customer.first_name || '').toLowerCase().trim();
-  const lastName = (shippingAddr.last_name || customer.last_name || '').toLowerCase().trim();
-  const country = (shippingAddr.country_code || shippingAddr.country || '').toLowerCase().slice(0, 2);
-  const city = (shippingAddr.city || '').toLowerCase().replace(/\s/g, '');
+  const email = (order.email || customer.email || order.buyerEmail || recv.receiverEmail || '').toLowerCase().trim();
+  const phone = normPhone(order.phone || customer.phone || shippingAddr.phone || recv.receiverMobile || order.buyerPhone || '');
+  const firstName = (shippingAddr.first_name || recv.receiverFirstName || customer.first_name || '').toLowerCase().trim();
+  const lastName = (shippingAddr.last_name || recv.receiverLastName || customer.last_name || '').toLowerCase().trim();
+  const country = (shippingAddr.country_code || shippingAddr.country || recv.receiverCountryCode || '').toLowerCase().slice(0, 2);
+  const city = (shippingAddr.city || recv.receiverCity || '').toLowerCase().replace(/\s/g, '');
   // State: prefer province_code (e.g. "CA") over full name ("California") per Meta spec.
   // For GB orders shippingAddr.province may be "Greater London" - lowercased w/ spaces removed.
-  const stateCode = (shippingAddr.province_code || shippingAddr.province || '').toLowerCase().replace(/\s/g, '');
+  const stateCode = (shippingAddr.province_code || shippingAddr.province || recv.receiverProvinceCode || recv.receiverProvince || '').toLowerCase().replace(/\s/g, '');
   // Country-aware zip normalization. Default 5-char slice was truncating UK postcodes
   // (SW1A 1AA → sw1a1, missing last 2 chars → hash mismatch with Meta records).
-  const zip = normZip(shippingAddr.zip || '', country);
-  const externalId = String(customer.id || customer.user_id || order.user_id || '');
+  const zip = normZip(shippingAddr.zip || recv.receiverPostcode || '', country);
+  const externalId = String(customer.id || customer.user_id || order.user_id || order.buyerId || customer.buyerId || '');
 
   // Browser-set fields from cart attributes; if _fbc missing but landing URL has
   // fbclid, construct fbc = fb.<ver>.<click_ts_ms>.<fbclid> per Meta CAPI spec.
@@ -476,17 +532,25 @@ async function buildMetaEvent(order, request, landingInfo) {
   const clientUa = clientDetails.user_agent || userAgentFromCart || '';
 
   const userData = {};
-  if (email) userData.em = [await sha256Hex(email)];
-  if (phone) userData.ph = [await sha256Hex(phone)];
-  if (firstName) userData.fn = [await sha256Hex(firstName)];
-  if (lastName) userData.ln = [await sha256Hex(lastName)];
-  if (city) userData.ct = [await sha256Hex(city)];
-  if (stateCode) userData.st = [await sha256Hex(stateCode)];
-  if (zip) userData.zp = [await sha256Hex(zip)];
-  if (country) userData.country = [await sha256Hex(country)];
-  if (externalId) userData.external_id = [await sha256Hex(externalId.toLowerCase())];
-  if (fbc) userData.fbc = fbc;
-  if (fbp) userData.fbp = fbp;
+  if (isCleanPII('em', email)) userData.em = [await sha256Hex(email)];
+  if (isCleanPII('ph', phone)) userData.ph = [await sha256Hex(phone)];
+  if (isCleanPII('fn', firstName)) userData.fn = [await sha256Hex(firstName)];
+  if (isCleanPII('ln', lastName)) userData.ln = [await sha256Hex(lastName)];
+  if (isCleanPII('ct', city)) userData.ct = [await sha256Hex(city)];
+  if (isCleanPII('st', stateCode)) userData.st = [await sha256Hex(stateCode)];
+  if (isCleanPII('zp', zip)) userData.zp = [await sha256Hex(zip)];
+  if (isCleanPII('country', country)) userData.country = [await sha256Hex(country)];
+  // external_id: only real Shopline customer.id (digit-only 6+ chars). Reject UUIDs
+  // that don't match any FB user (browser↔CAPI dedup uses event_id, not external_id).
+  if (isCleanPII('external_id', externalId) && /^\d{6,}$/.test(externalId.toLowerCase())) {
+    userData.external_id = [await sha256Hex(externalId.toLowerCase())];
+  }
+  // fbc/fbp gate: reject test sentinels and malformed values that pollute Meta EMQ
+  if (fbc && /^fb\.1\.\d+\.[^.]{20,}$/.test(fbc) && !/test|debug|dev|sample|enricher/i.test(fbc)) {
+    userData.fbc = fbc;
+  }
+  // Real Meta fbp can have extension segments (Open Bridge, etc.): fb.1.<ts>.<rand>(.<ext>)*
+  if (fbp && /^fb\.1\.\d+\.[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*$/.test(fbp)) userData.fbp = fbp;
   if (clientIp) userData.client_ip_address = clientIp;
   if (clientUa) userData.client_user_agent = clientUa;
 
@@ -590,6 +654,18 @@ function extractCartAttrs(order) {
     }
   }
   return out;
+}
+
+function isCleanPII(field, value) {
+  if (!value || typeof value !== 'string') return false;
+  const s = String(value).trim();
+  if (s.length < 2) return false;
+  if (/^[\*#\-_]+$/.test(s)) return false;
+  if (/^(test|--no-value--|none|null|undefined|n\/a|placeholder|sample|dummy|fake)$/i.test(s)) return false;
+  if (/@example\.(com|org|net|test)$/i.test(s)) return false;
+  if (/[\*#]{3,}/.test(s)) return false;
+  if (field === 'country' && s.length > 4) return false;
+  return true;
 }
 
 function normZip(zip, countryCode) {

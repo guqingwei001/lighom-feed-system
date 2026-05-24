@@ -26,8 +26,9 @@ const BOT_UA_PATTERNS = [
   'facebookexternalhit', 'meta-externalagent', 'facebookbot', 'whatsapp',
   // Search engines — should never trigger CAPI events but they sometimes run JS now
   'googlebot', 'bingbot', 'applebot', 'duckduckbot', 'yandexbot', 'baiduspider',
-  // Pinterest's own validator
-  'pinterest', 'pinterestbot',
+  // Pinterest's own crawler ONLY — must NOT match Pinterest in-app browser UA
+  // (e.g. "Mobile/15E148 Pinterest/iOS"), which is a REAL paying user.
+  'pinterestbot',
   // SEO crawlers
   'ahrefsbot', 'semrushbot', 'mj12bot', 'dotbot', 'rogerbot', 'screaming frog',
   'sitebulb', 'serpstatbot', 'seokicks', 'majestic', 'blexbot',
@@ -110,8 +111,12 @@ export function detectBot(request) {
     if (ua.includes(pat)) { ua_match = true; ua_hit = pat; break; }
   }
 
-  // 2) ASN match
-  const asn_match = asn > 0 && BOT_ASNS.has(asn);
+  // 2) ASN match — but ONLY block on ASN when UA does NOT look like a real
+  // browser. FB ASN 32934 routes real in-app users (FBAN/FBIOS/FB4A) and
+  // Cloudflare WARP / VPN providers route real Safari/Chrome from datacenter
+  // ASNs. Trust real-browser UA over ASN.
+  const looks_like_browser = /^Mozilla\/5\.0/i.test(ua) && /(AppleWebKit|Gecko|Trident|Edg\/)/i.test(ua);
+  const asn_match = asn > 0 && BOT_ASNS.has(asn) && !looks_like_browser;
 
   // 3) Cloudflare verified bot signal (set by CF's free bot detection)
   // request.cf.botManagement.verifiedBot is true for Google/Bing/Pinterest verified crawlers

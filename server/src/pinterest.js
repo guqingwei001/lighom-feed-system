@@ -105,6 +105,7 @@ export async function pinterestSend(env, metaEvent, clickIdEpik) {
 // events, send event_name="custom" and put the differentiator in custom_data.
 function metaEventToPinterest(metaName) {
   const map = {
+    PageView: 'page_visit',
     Purchase: 'checkout',
     AddToCart: 'add_to_cart',
     ViewContent: 'page_visit',

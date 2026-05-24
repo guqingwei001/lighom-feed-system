@@ -71,7 +71,11 @@ export async function handleEvent(request, env) {
       if (!utm.campaign && u.searchParams.get('utm_campaign')) utm.campaign = u.searchParams.get('utm_campaign');
     } catch (_) { /* invalid URL — ignore */ }
   }
-  const eventTime = body.event_time || Math.floor(Date.now() / 1000);
+  // Clamp client timestamp: clients with clock skew (future or > 7d old) get
+  // rejected by Meta CAPI (error_subcode 2804004). Force into valid window.
+  const nowSec = Math.floor(Date.now() / 1000);
+  let eventTime = Number(body.event_time) || nowSec;
+  if (eventTime > nowSec || eventTime < nowSec - 7 * 86400) eventTime = nowSec;
 
   const userData = {};
   // Hash em/ph if provided in plaintext; pass through if already hashed (64-char hex).
@@ -85,8 +89,21 @@ export async function handleEvent(request, env) {
   if (ud.country) userData.country = await maybeHashArr(ud.country);
   if (ud.db) userData.db = await maybeHashArr(ud.db);
   if (ud.ge) userData.ge = await maybeHashArr(ud.ge);
-  if (ud.external_id) userData.external_id = await maybeHashArr(String(ud.external_id).toLowerCase());
-  if (ud.fbc) userData.fbc = ud.fbc;
+  // external_id: only forward real Shopline customer.id (digit-only 6+ chars).
+  // Reject crypto.randomUUID UUIDs + "u-<ts>-<rand>" anonymous-device fallbacks —
+  // those are useful for browser↔CAPI dedup but Meta can't match UUIDs to FB users
+  // so they bloat coverage stats (100%) without contributing to EMQ.
+  if (ud.external_id) {
+    const xidRaw = String(ud.external_id).toLowerCase();
+    if (/^\d{6,}$/.test(xidRaw)) {
+      userData.external_id = await maybeHashArr(xidRaw);
+    }
+  }
+  // fbc gate: reject test/debug fbclid sentinels (e.g. ENRICHER_V10_TEST) that
+  // never existed on facebook.com — Meta can't reverse-match them so they pollute EMQ.
+  if (ud.fbc && /^fb\.1\.\d+\.[^.]{20,}$/.test(ud.fbc) && !/test|debug|dev|sample|enricher/i.test(ud.fbc)) {
+    userData.fbc = ud.fbc;
+  }
   if (ud.fbp) userData.fbp = ud.fbp;
   // Prefer explicit client_ua in body; fall back to request's User-Agent header
   const ua = ud.client_ua || request.headers.get('User-Agent') || '';
@@ -94,6 +111,28 @@ export async function handleEvent(request, env) {
   // Use Cloudflare's built-in client IP detection
   const cfIp = request.headers.get('CF-Connecting-IP') || request.headers.get('X-Real-IP') || '';
   if (cfIp) userData.client_ip_address = cfIp;
+
+  // Geo enrichment from Cloudflare Worker request.cf — zero-latency, free plan.
+  // request.cf populates regionCode/city even when headers don't (Pro+ only).
+  // Only fills when user-supplied PII missing; never overrides.
+  // ZIP/FN/LN intentionally not inferred — IP can't.
+  const cf = request.cf || {};
+  // Anomalies: XX (unknown), T1 (Tor exit), regional aggregates AP/EU.
+  // Accept only real ISO 3166-1 alpha-2 letters.
+  const cfCountry = cf.country || request.headers.get('cf-ipcountry') || '';
+  if (!userData.country && /^[a-z]{2}$/i.test(cfCountry) && !/^(XX|T1|AP|EU)$/i.test(cfCountry)) {
+    userData.country = [await sha256Hex(cfCountry.toLowerCase())];
+  }
+  const cfRegion = cf.regionCode || cf.region || request.headers.get('cf-region-code') || request.headers.get('cf-region') || '';
+  if (!userData.st && cfRegion) {
+    const v = String(cfRegion).toLowerCase().replace(/\s/g, '');
+    if (/^[a-z0-9-]{1,8}$/.test(v) && v !== 'unknown') userData.st = [await sha256Hex(v)];
+  }
+  const cfCity = cf.city || request.headers.get('cf-ipcity') || '';
+  if (!userData.ct && cfCity) {
+    const v = String(cfCity).toLowerCase().replace(/\s/g, '');
+    if (v && v.length <= 32 && !/^(unknown|none|null)$/.test(v)) userData.ct = [await sha256Hex(v)];
+  }
 
   // [2026-05-21] EMQ enrichment by external_id — upper-funnel events (PV/VC/VCat/ATC)
   // usually lack em/ph/fn/ln/geo because the customer hasn't entered them yet at that
@@ -271,8 +310,10 @@ export async function handleEvent(request, env) {
     ? { ...metaEvent, event_id: pinterestEventId }
     : metaEvent;
 
+  // epik gate: reject test-marked Pinterest click IDs (real epik is 20+ char opaque)
+  const epikClean = (ud.epik && ud.epik.length >= 20 && !/test|debug|dev|sample|enricher/i.test(ud.epik)) ? ud.epik : '';
   const pinterestPromise = wantPinterest
-    ? pinterestSend(env, pinterestEvent, ud.epik || '')
+    ? pinterestSend(env, pinterestEvent, epikClean)
     : Promise.resolve({ ok: false, skipped: true, reason: isDuplicate ? `dedup_first_seen:${dupFirstSeen}` : (bot.is_bot ? `bot_filtered:${bot.reason}` : 'fanout_excluded') });
 
   const ga4Promise = wantGa4

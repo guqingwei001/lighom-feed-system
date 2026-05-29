@@ -15,16 +15,10 @@
  * Purchase → "checkout".
  */
 
-export async function pinterestSend(env, metaEvent, clickIdEpik) {
-  if (!env.PINTEREST_ACCESS_TOKEN || !env.PINTEREST_AD_ACCOUNT_ID) {
-    return { ok: false, skipped: true, reason: 'pinterest secrets not set' };
-  }
-
-  // Translate Meta-style event name → Pinterest standard event
+// Exported for /capi/event?debug=1 dry-run inspection. Returns the body that
+// pinterestSend would POST to Pinterest, including Pinterest-specific hashing.
+export async function buildPinterestBody(metaEvent, clickIdEpik) {
   const eventName = metaEventToPinterest(metaEvent.event_name);
-
-  // Pinterest user_data — same SHA-256 hashed fields as Meta. Reuse hashes from
-  // the already-built Meta event (single source of truth).
   const ud = metaEvent.user_data || {};
   const userData = {};
   if (ud.em) userData.em = ud.em;
@@ -35,7 +29,18 @@ export async function pinterestSend(env, metaEvent, clickIdEpik) {
   if (ud.st) userData.st = ud.st;
   if (ud.zp) userData.zp = ud.zp;
   if (ud.country) userData.country = ud.country;
-  if (ud.external_id) userData.external_id = ud.external_id;
+  // [2026-05-26] Pinterest CAPI requires SHA256 hashed external_id (unlike Meta which
+  // takes plain). Source: Pinterest official Python SDK spec — external_id is "Sha256
+  // hashes of the unique id from the advertiser". Hash here, downstream of Meta path
+  // which keeps it plain.
+  if (ud.external_id) {
+    const ids = Array.isArray(ud.external_id) ? ud.external_id : [ud.external_id];
+    userData.external_id = await Promise.all(ids.map(async (id) => {
+      const s = String(id).toLowerCase().trim();
+      if (/^[a-f0-9]{64}$/.test(s)) return s; // already hashed → pass through
+      return await pinSha256(s);
+    }));
+  }
   if (ud.client_ip_address) userData.client_ip_address = ud.client_ip_address;
   if (ud.client_user_agent) userData.client_user_agent = ud.client_user_agent;
   // Pinterest click_id (singular, plain — comes from _epik cookie via cart attrs)
@@ -67,12 +72,18 @@ export async function pinterestSend(env, metaEvent, clickIdEpik) {
     user_data: userData,
     custom_data: customData,
   };
+  return { event };
+}
 
+export async function pinterestSend(env, metaEvent, clickIdEpik) {
+  if (!env.PINTEREST_ACCESS_TOKEN || !env.PINTEREST_AD_ACCOUNT_ID) {
+    return { ok: false, skipped: true, reason: 'pinterest secrets not set' };
+  }
+  const { event } = await buildPinterestBody(metaEvent, clickIdEpik);
   const body = { data: [event] };
   if (env.PINTEREST_TEST_EVENT_CODE) {
     body.test_metadata = { test_event_code: env.PINTEREST_TEST_EVENT_CODE };
   }
-
   const url = `https://api.pinterest.com/v5/ad_accounts/${env.PINTEREST_AD_ACCOUNT_ID}/events`;
   let resp;
   try {
@@ -94,7 +105,7 @@ export async function pinterestSend(env, metaEvent, clickIdEpik) {
     ok: resp.ok,
     status: resp.status,
     response: parsed || txt.slice(0, 500),
-    event_name: eventName,
+    event_name: event.event_name,
   };
 }
 
@@ -103,6 +114,11 @@ export async function pinterestSend(env, metaEvent, clickIdEpik) {
 // lead, page_visit, search, signup, view_category, watch_video. Any other string
 // is rejected ("大量错误请求" warning in Events Manager → Health). For non-standard
 // events, send event_name="custom" and put the differentiator in custom_data.
+async function pinSha256(s) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 function metaEventToPinterest(metaName) {
   const map = {
     PageView: 'page_visit',

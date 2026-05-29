@@ -55,10 +55,11 @@ export async function handleCapi(request, env, url) {
     return capiHealth(request, env, url);
   }
   // Read-only dedup check for browser Purchase block (B): "has this order's
-  // Purchase already been sent?" Pure KV.get — never writes/deletes. fail-open:
-  // any error / missing oid / missing KV → {sent:false} so the browser fbq
-  // fires normally (never blocks/loses a real Purchase). Same kvKey scheme as
-  // events.js Layer-1 (`purchase_order_<order_id>`, 90d TTL written by /capi/event).
+  // Purchase already been sent to <platform>?" Pure KV.get — never writes/deletes.
+  // fail-open: any error / missing oid / missing KV → {sent:false} so the browser
+  // fbq fires normally (never blocks/loses a real Purchase).
+  // [2026-05-26] Per-platform: default platform=meta keeps backward compat with
+  // existing browser blocks that called this endpoint for fbq dedup.
   if (url.pathname === '/capi/purchase-check') {
     const cors = {
       'Access-Control-Allow-Origin': '*',
@@ -69,10 +70,11 @@ export async function handleCapi(request, env, url) {
       return new Response(null, { status: 204, headers: cors });
     }
     const oid = url.searchParams.get('oid') || '';
+    const platform = (url.searchParams.get('platform') || 'meta').toLowerCase();
     let sent = false;
     try {
       if (oid && env.PURCHASE_DEDUP) {
-        const v = await env.PURCHASE_DEDUP.get(`purchase_order_${oid}`);
+        const v = await env.PURCHASE_DEDUP.get(`purchase_order_${oid}_${platform}`);
         sent = !!v;
       }
     } catch (_) { /* fail-open: leave sent=false → browser fires normally */ }
@@ -252,12 +254,13 @@ async function handleOrderWebhook(request, env) {
   const customer = o.customer || {};
   const userIdForGa4 = String(customer.id || customer.user_id || '');
 
-  // Phase 1: ad-network fanout. Meta + Pinterest intentionally skipped from /capi/order
-  // because both use event_id-based dedup and Worker webhook can't access browser's
-  // serverEventId. Browser → /capi/event with serverEventId is the canonical path.
-  // GA4 stays enabled (transaction_id dedup works regardless of which path fires).
-  const skipMeta = env.WORKER_ORDER_SKIP_META !== '0';
-  const skipPinterest = env.WORKER_ORDER_SKIP_PINTEREST !== '0';
+  // Phase 1: ad-network fanout. Default SENDS Meta+Pinterest from /capi/order as the
+  // server-side backstop (browser self-pixel/self-pin can miss on fast thank-you exits).
+  // event_id == browser's purchase_<appOrderSeq> (SEID bridge above aligns to native fbq)
+  // so Meta/Pinterest dedup the webhook send against the browser send. To turn a platform
+  // OFF, set WORKER_ORDER_SKIP_META / WORKER_ORDER_SKIP_PINTEREST = '1' (safe default: send).
+  const skipMeta = env.WORKER_ORDER_SKIP_META === '1';
+  const skipPinterest = env.WORKER_ORDER_SKIP_PINTEREST === '1';
   const [metaSettled, pinterestSettled, ga4Settled] = await Promise.allSettled([
     skipMeta
       ? Promise.resolve({ ok: false, skipped: true, reason: 'order_webhook_skips_meta_to_avoid_dedup_loss' })
@@ -272,21 +275,21 @@ async function handleOrderWebhook(request, env) {
   const pinterest = settledOr(pinterestSettled);
   const google = settledOr(ga4Settled);
 
-  // [2026-05-22] Write purchase_order_<seq> KV so browser revisit Purchase fires
-  // (which call /capi/event with same order_id) hit events.js Layer-1 dedup and
-  // skip fanout. Without this, 4/26 orders since 5/1 had browser fires > 7d after
-  // order placement → outside Meta event_id dedup window → Meta double-counted.
-  // 90d TTL matches events.js. Conditioned on any dispatch ok so a total Worker
-  // failure leaves KV unwritten and browser can still recover. Fail-open on KV err.
+  // [2026-05-26] Per-platform KV writes: only mark dedup for platforms this webhook
+  // actually delivered to (meta.ok / pinterest.ok / google.ok). With the default send,
+  // a successful webhook send writes that platform's key — but browser blocks use the
+  // SAME event_id so Meta/Pin dedup the pair anyway (key just prevents 3rd+ fire).
+  // Old shared-key version [2026-05-22] blocked all platforms on GA4-only webhook
+  // success, killing Pin Purchase v1 5/22-5/26 (BQ pin_ok=0). 90d TTL matches events.js.
   try {
-    const anyOk = (meta && meta.ok) || (pinterest && pinterest.ok) || (google && google.ok);
     const dedupSeq = String(o.name || o.app_order_seq || o.appOrderSeq || '').replace(/^#/, '');
-    if (anyOk && dedupSeq && env.PURCHASE_DEDUP) {
-      await env.PURCHASE_DEDUP.put(
-        `purchase_order_${dedupSeq}`,
-        new Date().toISOString(),
-        { expirationTtl: 7776000 }
-      );
+    if (dedupSeq && env.PURCHASE_DEDUP) {
+      const nowIso = new Date().toISOString();
+      const writes = [];
+      if (meta && meta.ok) writes.push(env.PURCHASE_DEDUP.put(`purchase_order_${dedupSeq}_meta`, nowIso));
+      if (pinterest && pinterest.ok) writes.push(env.PURCHASE_DEDUP.put(`purchase_order_${dedupSeq}_pinterest`, nowIso));
+      if (google && google.ok) writes.push(env.PURCHASE_DEDUP.put(`purchase_order_${dedupSeq}_ga4`, nowIso));
+      if (writes.length) await Promise.allSettled(writes);
     }
   } catch (_) { /* KV outage non-fatal — fanout already delivered */ }
 
@@ -540,10 +543,10 @@ async function buildMetaEvent(order, request, landingInfo) {
   if (isCleanPII('st', stateCode)) userData.st = [await sha256Hex(stateCode)];
   if (isCleanPII('zp', zip)) userData.zp = [await sha256Hex(zip)];
   if (isCleanPII('country', country)) userData.country = [await sha256Hex(country)];
-  // external_id: only real Shopline customer.id (digit-only 6+ chars). Reject UUIDs
-  // that don't match any FB user (browser↔CAPI dedup uses event_id, not external_id).
+  // [2026-05-26] external_id: PLAIN per Meta official spec ("Not hashed - no hash required").
+  // Pinterest CAPI hashes at pinterest.js (Pinterest spec differs from Meta).
   if (isCleanPII('external_id', externalId) && /^\d{6,}$/.test(externalId.toLowerCase())) {
-    userData.external_id = [await sha256Hex(externalId.toLowerCase())];
+    userData.external_id = [externalId.toLowerCase()];
   }
   // fbc/fbp gate: reject test sentinels and malformed values that pollute Meta EMQ
   if (fbc && /^fb\.1\.\d+\.[^.]{20,}$/.test(fbc) && !/test|debug|dev|sample|enricher/i.test(fbc)) {

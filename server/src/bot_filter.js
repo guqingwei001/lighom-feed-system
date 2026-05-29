@@ -115,8 +115,14 @@ export function detectBot(request) {
   // browser. FB ASN 32934 routes real in-app users (FBAN/FBIOS/FB4A) and
   // Cloudflare WARP / VPN providers route real Safari/Chrome from datacenter
   // ASNs. Trust real-browser UA over ASN.
-  const looks_like_browser = /^Mozilla\/5\.0/i.test(ua) && /(AppleWebKit|Gecko|Trident|Edg\/)/i.test(ua);
-  const asn_match = asn > 0 && BOT_ASNS.has(asn) && !looks_like_browser;
+  const looks_like_browser = /^mozilla\/5\.0/i.test(ua) && /(applewebkit|gecko|trident|edg\/)/i.test(ua);
+  const is_inapp_browser =
+       ua.includes('fban/fb4a') || ua.includes('fban/fbios')
+    || ua.includes('instagram ') || ua.includes(' instagram/')
+    || ua.includes('pinterest/ios') || ua.includes('pinterest/android')
+    || ua.includes('tiktok') || ua.includes('musical_ly')
+    || ua.includes('snapchat');
+  const asn_match = asn > 0 && BOT_ASNS.has(asn) && !looks_like_browser && !is_inapp_browser;
 
   // 3) Cloudflare verified bot signal (set by CF's free bot detection)
   // request.cf.botManagement.verifiedBot is true for Google/Bing/Pinterest verified crawlers

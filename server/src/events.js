@@ -27,7 +27,7 @@
  *   - BigQuery     (engagements table)
  */
 
-import { pinterestSend } from './pinterest.js';
+import { pinterestSend, buildPinterestBody } from './pinterest.js';
 import { ga4mpSend } from './ga4mp.js';
 import { insertRow as bqInsertRow } from './bigquery.js';
 import { detectBot } from './bot_filter.js';
@@ -89,15 +89,25 @@ export async function handleEvent(request, env) {
   if (ud.country) userData.country = await maybeHashArr(ud.country);
   if (ud.db) userData.db = await maybeHashArr(ud.db);
   if (ud.ge) userData.ge = await maybeHashArr(ud.ge);
-  // external_id: only forward real Shopline customer.id (digit-only 6+ chars).
-  // Reject crypto.randomUUID UUIDs + "u-<ts>-<rand>" anonymous-device fallbacks —
-  // those are useful for browser↔CAPI dedup but Meta can't match UUIDs to FB users
-  // so they bloat coverage stats (100%) without contributing to EMQ.
+  // [2026-05-26] external_id: PLAIN per Meta official spec ("Not hashed - no hash required").
+  // Meta SDK source confirms: external_id bypasses normalize_array hashing pipeline.
+  // Pinterest CAPI hashes external_id at pinterest.js layer (Pinterest spec requires SHA256).
+  // Accept input as Array or single string. Validate each entry:
+  //   - Purchase events: digit-only customer.id (preserves cust_id-only attribution purity)
+  //   - Other events: digit-only customer.id OR UUID v4 (cookie-based persistent visitor ID)
+  // External cookie IDs are official Meta-supported external_id per docs:
+  // "External IDs can be any unique ID from the advertiser, such as loyalty membership IDs,
+  //  user IDs, and external cookie IDs."
   if (ud.external_id) {
-    const xidRaw = String(ud.external_id).toLowerCase();
-    if (/^\d{6,}$/.test(xidRaw)) {
-      userData.external_id = await maybeHashArr(xidRaw);
-    }
+    const isPurchaseEvent = body.event_name === 'Purchase';
+    const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    const DIGIT = /^\d{6,}$/;
+    const isValid = (s) => DIGIT.test(s) || (!isPurchaseEvent && UUID_V4.test(s));
+    const raw = Array.isArray(ud.external_id) ? ud.external_id : [ud.external_id];
+    const cleaned = raw
+      .map(v => String(v).toLowerCase().trim())
+      .filter(isValid);
+    if (cleaned.length) userData.external_id = cleaned;
   }
   // fbc gate: reject test/debug fbclid sentinels (e.g. ENRICHER_V10_TEST) that
   // never existed on facebook.com — Meta can't reverse-match them so they pollute EMQ.
@@ -219,6 +229,24 @@ export async function handleEvent(request, env) {
   if (cd.content_name) customData.content_name = cd.content_name;
   if (cd.content_category) customData.content_category = cd.content_category;
 
+  // PII whitelist by event_name. Meta penalizes "duplicate phone/email" when 1 returning
+  // user fires same hash across many low-funnel events (e.g. 1 user → 250 ViewCategory →
+  // 50%+ dup warning). Strip personal identifiers from low-intent events; keep CF geo +
+  // ip/ua + fbc/fbp + external_id (those don't cause duplicate noise).
+  // 2026-05-25 — added after Meta "duplicate Phone numbers" warning on ViewCategory.
+  const HIGH_INTENT_EVENTS = new Set([
+    'AddToCart','InitiateCheckout','AddPaymentInfo','Purchase',
+    'Subscribe','Lead','CompleteRegistration','Contact'
+  ]);
+  if (!HIGH_INTENT_EVENTS.has(body.event_name)) {
+    delete userData.em;
+    delete userData.ph;
+    delete userData.fn;
+    delete userData.ln;
+    delete userData.db;
+    delete userData.ge;
+  }
+
   const metaEvent = {
     event_name: body.event_name,
     event_time: eventTime,
@@ -229,13 +257,31 @@ export async function handleEvent(request, env) {
     custom_data: customData,
   };
 
+  // [2026-05-26] ?debug=1 dry-run: return what Worker WOULD send to Meta + Pinterest
+  // without actually firing CAPI/KV/BQ. Inspect field hashing per-platform spec.
+  // Only enabled when WORKER_DEBUG_ENABLE=1 (staging env), no-op in prod.
+  if (env.WORKER_DEBUG_ENABLE === '1' && new URL(request.url).searchParams.get('debug') === '1') {
+    const epikDbg = (ud.epik && ud.epik.length >= 20 && !/test|debug|dev|sample|enricher/i.test(ud.epik)) ? ud.epik : '';
+    const pinBody = await buildPinterestBody(metaEvent, epikDbg);
+    return jsonResp(200, {
+      ok: true,
+      debug: true,
+      note: 'dry-run: no Meta/Pin/GA4/BQ/KV writes',
+      meta_event: metaEvent,
+      pinterest_event: pinBody.event
+    }, request);
+  }
+
   // GA4 client_id: prefer browser-passed _ga cookie value (so Worker MP shares
   // session with browser gtag), then external_id, then event_id-derived fallback.
   // _ga cookie format: "GA1.1.<random>.<timestamp>" — GA4 wants "<random>.<timestamp>".
+  // [2026-05-26] Array-aware: if ud.external_id is Array (future Meta-SDK-style multi-ID),
+  // take first element only — GA4 user_id expects single string.
   const gaClientIdRaw = ud.ga_cookie || body.ga_cookie || '';
+  const extIdSingle = Array.isArray(ud.external_id) ? ud.external_id[0] : ud.external_id;
   const gaClientId = gaClientIdRaw
     ? gaClientIdRaw.replace(/^GA\d+\.\d+\./, '')
-    : (ud.external_id || `cid_${body.event_id}`);
+    : (extIdSingle || `cid_${body.event_id}`);
 
   // Purchase events MUST have valid value+currency or Meta flags as wrong format.
   // Skip Meta send for invalid Purchase rather than sending bad data that hurts ROAS / ad performance.
@@ -253,7 +299,7 @@ export async function handleEvent(request, env) {
   // is skipped to keep EMQ scoring clean.
   const bot = detectBot(request);
 
-  // Layer-1 Purchase dedup (ALL platforms: Meta+Pinterest+GA4 share isDuplicate gate):
+  // Layer-1 Purchase dedup (per-platform — see [2026-05-26] block below):
   // same order_id Purchase fired multiple times (refresh / multi-tab / bot crawl /
   // owner re-opening real customers' thank-you pages across DAYS to test). Keep first,
   // drop rest. 5/19: TTL 24h→90d — owner test-retests span many days (5/8–5/18 seen),
@@ -261,23 +307,33 @@ export async function handleEvent(request, env) {
   // only ever has ONE legitimate Purchase; any same order_id within 90d = duplicate,
   // so longer TTL never blocks a real sale. 5/9 obs: LIG100131863 fired 5x/35min/3
   // devices/2 countries; same-order repeats are the rule, not the exception.
-  let isDuplicate = false;
-  let dupFirstSeen = null;
+  // [2026-05-26] Per-platform dedup keys: `purchase_order_<id>_<meta|pinterest|ga4>`
+  // Old shared key `purchase_order_<id>` blocked all platforms when ANY first writer
+  // claimed it (5/22 webhook started writing it on GA4-only success → blocked all
+  // browser Meta+Pin fires). Per-platform isolates: webhook writes _ga4, browser
+  // Meta block writes _meta, browser Pin block writes _pinterest — each only blocks
+  // its own platform's revisit/race. Old key still readable in KV but no longer
+  // checked; expires naturally at 90d TTL.
+  const fanoutSetDefault = new Set(['meta', 'pinterest', 'ga4']);
+  const fanoutSet = Array.isArray(body.fanout)
+    ? new Set(body.fanout.map((s) => String(s).toLowerCase()))
+    : fanoutSetDefault;
   const orderIdForDedup = isPurchase && cd.order_id ? String(cd.order_id) : null;
+  const dup = { meta: false, pinterest: false, ga4: false };
+  const dupSeen = { meta: null, pinterest: null, ga4: null };
   if (orderIdForDedup && env.PURCHASE_DEDUP) {
-    const kvKey = `purchase_order_${orderIdForDedup}`;
-    try {
-      const prev = await env.PURCHASE_DEDUP.get(kvKey);
-      if (prev) {
-        isDuplicate = true;
-        dupFirstSeen = prev;
-      } else {
-        await env.PURCHASE_DEDUP.put(kvKey, new Date().toISOString(), { expirationTtl: 7776000 });
+    const nowIso = new Date().toISOString();
+    await Promise.all(['meta', 'pinterest', 'ga4'].map(async (p) => {
+      if (!fanoutSet.has(p)) return;
+      const kvKey = `purchase_order_${orderIdForDedup}_${p}`;
+      try {
+        const prev = await env.PURCHASE_DEDUP.get(kvKey);
+        if (prev) { dup[p] = true; dupSeen[p] = prev; }
+        else { await env.PURCHASE_DEDUP.put(kvKey, nowIso); }
+      } catch (e) {
+        console.error('PURCHASE_DEDUP error:', String(e).slice(0, 200));
       }
-    } catch (e) {
-      // KV outage should not block fanout — fail open
-      console.error('PURCHASE_DEDUP error:', String(e).slice(0, 200));
-    }
+    }));
   }
 
   // Selective fanout: clients can request a subset of platforms via body.fanout.
@@ -285,19 +341,33 @@ export async function handleEvent(request, env) {
   // hijack capture) without affecting Meta CAPI delivery latency.
   // Empty array `body.fanout: []` is honored as "no platform sends" — used by the
   // PinterestHijackTelemetry events that only need a BQ row, not platform delivery.
-  const fanoutSet = Array.isArray(body.fanout)
-    ? new Set(body.fanout.map((s) => String(s).toLowerCase()))
-    : new Set(['meta', 'pinterest', 'ga4']);
 
-  const wantMeta = fanoutSet.has('meta') && !bot.is_bot && !isDuplicate;
-  const wantPinterest = fanoutSet.has('pinterest') && !bot.is_bot && !isDuplicate;
-  const wantGa4 = fanoutSet.has('ga4') && !bot.is_bot && !isDuplicate;
+  // [2026-05-27] Meta attribution gate — only fanout to Meta when the event could
+  // plausibly be attributed to a Meta ad. Drops SEO/direct/Pinterest-only visitors'
+  // PV/VC/ATC from Meta CAPI, raising dataset fbc coverage 52% → ~95%+.
+  // EM's "low fbc coverage" warning is dataset-level — sending un-attributable
+  // events pollutes the score. Purchase always fanout (highest-value, always need
+  // it for ROAS calc) — gate is for top-of-funnel only.
+  // NEVER fabricates fbc/fbp — only filters.
+  // Reuses existing `ud` (line 61), `utm` (line 65). Prior external_id block declares
+  // `isPurchaseEvent` but in a tighter scope — re-declare here for fanout gate scope.
+  const _isPurchaseEvent = body.event_name === 'Purchase';
+  const _hasFbc = typeof ud.fbc === 'string' && /^fb\.[12]\.\d+\.\w+/.test(ud.fbc);
+  const _hasFbp = typeof ud.fbp === 'string' && /^fb\.\d+\.\d+\.\d+/.test(ud.fbp);
+  const _hasEm  = Array.isArray(userData.em) ? userData.em.length > 0 : (typeof userData.em === 'string' && /^[a-f0-9]{64}$/i.test(userData.em));
+  const _hasPh  = Array.isArray(userData.ph) ? userData.ph.length > 0 : (typeof userData.ph === 'string' && /^[a-f0-9]{64}$/i.test(userData.ph));
+  const _utmMeta = /^(meta|facebook|fb|ig|instagram)/i.test(String(utm.source || ''));
+  const _hasMetaAttribution = _hasFbc || _hasFbp || _hasEm || _hasPh || _utmMeta;
+
+  const wantMeta = fanoutSet.has('meta') && !bot.is_bot && !dup.meta && (_hasMetaAttribution || _isPurchaseEvent);
+  const wantPinterest = fanoutSet.has('pinterest') && !bot.is_bot && !dup.pinterest;
+  const wantGa4 = fanoutSet.has('ga4') && !bot.is_bot && !dup.ga4;
 
   const metaPromise = wantMeta
     ? ((purchaseValid && contentIdsValid)
         ? metaCustomEventSend(env, metaEvent)
         : Promise.resolve({ ok: false, skipped: true, reason: !purchaseValid ? 'purchase_missing_value_or_currency' : 'missing_content_ids' }))
-    : Promise.resolve({ ok: false, skipped: true, reason: isDuplicate ? `dedup_first_seen:${dupFirstSeen}` : (bot.is_bot ? `bot_filtered:${bot.reason}` : 'fanout_excluded') });
+    : Promise.resolve({ ok: false, skipped: true, reason: dup.meta ? `dedup_first_seen:${dupSeen.meta}` : (bot.is_bot ? `bot_filtered:${bot.reason}` : (!_hasMetaAttribution && !_isPurchaseEvent ? 'no_meta_attribution' : 'fanout_excluded')) });
 
   // For Pinterest, allow client to override event_id with the value Shopline native
   // pintrk used (e.g. "PageView_xxx" / "ViewItem_xxx"). Without this, Worker CAPI events
@@ -314,11 +384,11 @@ export async function handleEvent(request, env) {
   const epikClean = (ud.epik && ud.epik.length >= 20 && !/test|debug|dev|sample|enricher/i.test(ud.epik)) ? ud.epik : '';
   const pinterestPromise = wantPinterest
     ? pinterestSend(env, pinterestEvent, epikClean)
-    : Promise.resolve({ ok: false, skipped: true, reason: isDuplicate ? `dedup_first_seen:${dupFirstSeen}` : (bot.is_bot ? `bot_filtered:${bot.reason}` : 'fanout_excluded') });
+    : Promise.resolve({ ok: false, skipped: true, reason: dup.pinterest ? `dedup_first_seen:${dupSeen.pinterest}` : (bot.is_bot ? `bot_filtered:${bot.reason}` : 'fanout_excluded') });
 
   const ga4Promise = wantGa4
     ? ga4mpSend(env, metaEvent, gaClientId)
-    : Promise.resolve({ ok: false, skipped: true, reason: isDuplicate ? `dedup_first_seen:${dupFirstSeen}` : (bot.is_bot ? `bot_filtered:${bot.reason}` : 'fanout_excluded') });
+    : Promise.resolve({ ok: false, skipped: true, reason: dup.ga4 ? `dedup_first_seen:${dupSeen.ga4}` : (bot.is_bot ? `bot_filtered:${bot.reason}` : 'fanout_excluded') });
 
   const [metaSettled, pinterestSettled, ga4Settled] = await Promise.allSettled([
     metaPromise,
@@ -338,7 +408,7 @@ export async function handleEvent(request, env) {
     page_type: body.page_type || null,
     page_url: body.page_url || null,
     page_path: body.page_path || null,
-    user_id: ud.external_id ? String(ud.external_id) : null,
+    user_id: extIdSingle ? String(extIdSingle) : null,
     email_hashed: arr0(userData.em),
     // [2026-05-21] PII field presence monitoring (BQ doesn't store the hashes
     // themselves to keep PII surface small + storage cheap; just bool flags so
@@ -373,8 +443,8 @@ export async function handleEvent(request, env) {
     is_bot: bot.is_bot,
     bot_reason: bot.reason || null,
     bot_asn: bot.asn || null,
-    is_duplicate: isDuplicate,
-    duplicate_first_seen: dupFirstSeen,
+    is_duplicate: dup.meta || dup.pinterest || dup.ga4,
+    duplicate_first_seen: dupSeen.meta || dupSeen.pinterest || dupSeen.ga4 || null,
   };
 
   // Skip BQ when client requests it (e.g., the deferred Pinterest-only POST in the

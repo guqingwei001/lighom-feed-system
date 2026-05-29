@@ -21,3 +21,15 @@ id = "abeb0a8287314cd4b27ddf4da33b43e3"
 # pattern = "feed.lighom.com/*"
 # zone_name = "lighom.com"
 # custom_domain = true
+
+[env.staging]
+name = "lighom-feed-server-staging"
+workers_dev = true
+
+[[env.staging.r2_buckets]]
+binding = "FEEDS"
+bucket_name = "lighom-feeds"
+
+[[env.staging.kv_namespaces]]
+binding = "PURCHASE_DEDUP"
+id = "3ee16eb5b9cb4bdeb283a99e6c2cc4ce"

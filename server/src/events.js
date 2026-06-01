@@ -31,6 +31,9 @@ import { pinterestSend, buildPinterestBody } from './pinterest.js';
 import { ga4mpSend } from './ga4mp.js';
 import { insertRow as bqInsertRow } from './bigquery.js';
 import { detectBot } from './bot_filter.js';
+import { sha256Hex } from './crypto.js';
+import { settledOr } from './utils.js';
+import { metaSend } from './meta.js';
 
 const ALLOWED_ORIGINS = /^https:\/\/(www\.)?lighom\.com$/;
 
@@ -56,6 +59,8 @@ export async function handleEvent(request, env) {
   if (!body.event_name || !body.event_id) {
     return jsonResp(400, { ok: false, error: 'missing event_name or event_id' }, request);
   }
+  // [5/31] Cap event_id at 64 chars. Meta recommends event_id <=40 chars (longer accepted but truncation rules unspecified — risks browser/server dedup mismatch). 64 chars covers all current id formats (purchase_<orderSeq>, ic_<token>_<rand>, search_<qhash>_<ts>) with headroom.
+  body.event_id = String(body.event_id).slice(0, 64);
 
   // Normalize internal "metaEvent" structure so we can reuse pinterestSend / ga4mpSend.
   const ud = body.user_data || {};
@@ -102,7 +107,12 @@ export async function handleEvent(request, env) {
     const isPurchaseEvent = body.event_name === 'Purchase';
     const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
     const DIGIT = /^\d{6,}$/;
-    const isValid = (s) => DIGIT.test(s) || (!isPurchaseEvent && UUID_V4.test(s));
+    /* 5/31 fix: accept 64-char hex hash passthrough — PII Persist v1 bridge writes
+       hashed external_id to no-suffix cookie; downstream blocks read it raw and
+       send here; without this gate they fall through to "no valid format" and
+       external_id gets dropped on every Lead/Contact/PV from returning customers. */
+    const HEX64 = /^[a-f0-9]{64}$/i;
+    const isValid = (s) => DIGIT.test(s) || HEX64.test(s) || (!isPurchaseEvent && UUID_V4.test(s));
     const raw = Array.isArray(ud.external_id) ? ud.external_id : [ud.external_id];
     const cleaned = raw
       .map(v => String(v).toLowerCase().trim())
@@ -183,7 +193,10 @@ export async function handleEvent(request, env) {
 
   const customData = {};
   if (cd.product_id) customData.content_ids = [String(cd.product_id)];
-  if (Array.isArray(cd.content_ids)) customData.content_ids = cd.content_ids.map(String);
+  if (Array.isArray(cd.content_ids)) {
+    // [5/31] Cap at 100 IDs — Meta CAPI accepts arrays but charges weight on dedup; cart size >100 is almost certainly a bug or scraper. Also cap each ID at 40 chars.
+    customData.content_ids = cd.content_ids.slice(0, 100).map(v => String(v).slice(0, 40));
+  }
   if (cd.content_type) customData.content_type = cd.content_type;
   // Strict numeric: Number + finite + > 0, round to 2 dp (Meta rejects NaN/Infinity/0/string).
   // Sanity cap at 50K — Lighom max cart is ~$20K (luxury chandelier × multi-qty); anything
@@ -214,6 +227,7 @@ export async function handleEvent(request, env) {
         if (it.brand) out.brand = String(it.brand).slice(0, 100);
         if (it.category) out.category = String(it.category).slice(0, 100);
         if (it.delivery_category) out.delivery_category = String(it.delivery_category);
+        if (it.item_group_id) out.item_group_id = String(it.item_group_id);
         return out;
       });
     if (validContents.length > 0) customData.contents = validContents;
@@ -224,10 +238,10 @@ export async function handleEvent(request, env) {
   if (cd.order_id) customData.order_id = String(cd.order_id);
   // predicted_ltv removed — placeholder values cause Meta to flag as invalid.
   // delivery_category removed — Lighom doesn't fit Meta enum (in_store/curbside/home_delivery).
-  // Search/category metadata
-  if (cd.search_string) customData.search_string = cd.search_string;
-  if (cd.content_name) customData.content_name = cd.content_name;
-  if (cd.content_category) customData.content_category = cd.content_category;
+  // Search/category metadata — cap length to defend against pathological queries / DOM-scrape leaks
+  if (cd.search_string) customData.search_string = String(cd.search_string).slice(0, 200);
+  if (cd.content_name) customData.content_name = String(cd.content_name).slice(0, 200);
+  if (cd.content_category) customData.content_category = String(cd.content_category).slice(0, 100);
 
   // PII whitelist by event_name. Meta penalizes "duplicate phone/email" when 1 returning
   // user fires same hash across many low-funnel events (e.g. 1 user → 250 ViewCategory →
@@ -365,7 +379,7 @@ export async function handleEvent(request, env) {
 
   const metaPromise = wantMeta
     ? ((purchaseValid && contentIdsValid)
-        ? metaCustomEventSend(env, metaEvent)
+        ? metaSend(env, metaEvent)
         : Promise.resolve({ ok: false, skipped: true, reason: !purchaseValid ? 'purchase_missing_value_or_currency' : 'missing_content_ids' }))
     : Promise.resolve({ ok: false, skipped: true, reason: dup.meta ? `dedup_first_seen:${dupSeen.meta}` : (bot.is_bot ? `bot_filtered:${bot.reason}` : (!_hasMetaAttribution && !_isPurchaseEvent ? 'no_meta_attribution' : 'fanout_excluded')) });
 
@@ -426,7 +440,8 @@ export async function handleEvent(request, env) {
     ttclid: ud.ttclid || null,
     msclkid: ud.msclkid || null,
     client_ip: cfIp || null,
-    client_ua: ud.client_ua || null,
+    /* 5/31 fix: BQ analytics bug — was `ud.client_ua || null` which only read body field; Meta CAPI got correct UA via line 122 fallback but BQ showed NULL for Lead/ATC/TimeOn180s that don't send body.client_ua. Now reads post-fallback userData.client_user_agent. */
+    client_ua: userData.client_user_agent || null,
     product_id: cd.product_id ? String(cd.product_id) : (Array.isArray(cd.content_ids) && cd.content_ids[0] ? String(cd.content_ids[0]) : null),
     value: typeof cd.value === 'number' ? cd.value : null,
     currency: cd.currency || null,
@@ -512,32 +527,9 @@ export async function handleEvent(request, env) {
   }, request);
 }
 
-async function metaCustomEventSend(env, event) {
-  if (!env.META_PIXEL_ID || !env.META_CAPI_ACCESS_TOKEN) {
-    return { ok: false, skipped: true, reason: 'meta secrets not set' };
-  }
-  const apiVersion = env.META_API_VERSION || 'v21.0';
-  const endpoint = `https://graph.facebook.com/${apiVersion}/${env.META_PIXEL_ID}/events`;
-  const payload = { data: [event] };
-  if (env.META_TEST_EVENT_CODE) payload.test_event_code = env.META_TEST_EVENT_CODE;
+/* metaCustomEventSend merged into meta.js metaSend(env, event) — D3 consolidation, 5/31 */
 
-  let r;
-  try {
-    r = await fetch(endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${env.META_CAPI_ACCESS_TOKEN}` },
-      body: JSON.stringify(payload),
-    });
-  } catch (err) { return { ok: false, error: 'fetch_failed', detail: String(err).slice(0, 300) }; }
-  const txt = await r.text();
-  let body = null;
-  try { body = JSON.parse(txt); } catch {}
-  return { ok: r.ok, status: r.status, response: body || txt.slice(0, 500) };
-}
-
-function settledOr(s) {
-  return s.status === 'fulfilled' ? s.value : { ok: false, error: String(s.reason).slice(0, 300) };
-}
+/* settledOr moved to utils.js (D2 consolidation, 5/31) */
 
 function arr0(v) {
   return Array.isArray(v) && v.length ? v[0] : null;
@@ -552,10 +544,7 @@ async function maybeHashArr(input) {
   return [await sha256Hex(s)];
 }
 
-async function sha256Hex(s) {
-  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
-  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
-}
+/* sha256Hex moved to crypto.js (D1 consolidation, 5/31) */
 
 function corsHeaders(request) {
   const origin = request.headers.get('Origin') || '';

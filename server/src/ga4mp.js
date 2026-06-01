@@ -36,7 +36,7 @@ export async function ga4mpSend(env, metaEvent, fallbackClientId) {
   // GA4 expects items as separate array. Use Meta contents as input.
   const items = (cd.contents || []).map((c, i) => ({
     item_id: String(c.id || ''),
-    item_name: String(c.name || c.id || ''),
+    item_name: String(c.title || c.name || c.id || ''),
     quantity: c.quantity || 1,
     price: typeof c.item_price === 'number' ? c.item_price : 0,
     index: i,

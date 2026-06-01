@@ -15,6 +15,8 @@
  * Purchase → "checkout".
  */
 
+import { sha256Hex } from './crypto.js';
+
 // Exported for /capi/event?debug=1 dry-run inspection. Returns the body that
 // pinterestSend would POST to Pinterest, including Pinterest-specific hashing.
 export async function buildPinterestBody(metaEvent, clickIdEpik) {
@@ -38,7 +40,7 @@ export async function buildPinterestBody(metaEvent, clickIdEpik) {
     userData.external_id = await Promise.all(ids.map(async (id) => {
       const s = String(id).toLowerCase().trim();
       if (/^[a-f0-9]{64}$/.test(s)) return s; // already hashed → pass through
-      return await pinSha256(s);
+      return await sha256Hex(s);
     }));
   }
   if (ud.client_ip_address) userData.client_ip_address = ud.client_ip_address;
@@ -55,13 +57,19 @@ export async function buildPinterestBody(metaEvent, clickIdEpik) {
   // dashboard can group/filter by it (Pinterest accepts arbitrary custom_data keys).
   if (eventName === 'custom') customData.event_name = String(metaEvent.event_name || '');
   // Pinterest requires contents[*].item_price as STRING (Meta uses number)
-  if (Array.isArray(cd.contents)) customData.contents = cd.contents.map(c => ({
-    id: String(c.id || ''),
-    quantity: Number(c.quantity) || 1,
-    item_price: c.item_price !== undefined ? String(c.item_price) : '0',
-  }));
+  if (Array.isArray(cd.contents)) customData.contents = cd.contents.map(c => {
+    const out = {
+      id: String(c.id || ''),
+      quantity: Number(c.quantity) || 1,
+      item_price: c.item_price !== undefined ? String(c.item_price) : '0',
+    };
+    if (c.item_group_id) out.item_group_id = String(c.item_group_id);
+    return out;
+  });
   if (typeof cd.num_items === 'number') customData.num_items = cd.num_items;
   if (cd.order_id) customData.order_id = cd.order_id;
+  // [5/31] Map Meta's custom_data.search_string → Pinterest's search_query (Pin Search event standard field). Client Pin Search v1 block sends search_string (Meta convention); without this remap the Pin CAPI Search event arrives with no query string.
+  if (cd.search_string) customData.search_query = String(cd.search_string);
 
   const event = {
     event_name: eventName,
@@ -114,12 +122,15 @@ export async function pinterestSend(env, metaEvent, clickIdEpik) {
 // lead, page_visit, search, signup, view_category, watch_video. Any other string
 // is rejected ("大量错误请求" warning in Events Manager → Health). For non-standard
 // events, send event_name="custom" and put the differentiator in custom_data.
-async function pinSha256(s) {
-  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
-  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
-}
+/* pinSha256 → sha256Hex (D1 consolidation, 5/31, moved to crypto.js) */
 
 function metaEventToPinterest(metaName) {
+  /* D9 5/31: explicit entries for events that previously fell through to
+     'custom' default. Contact → 'lead' is the only semantic change (Pin has
+     standard lead event). DeepEngagement + TimeOnPage180s stay 'custom' since
+     Pin has no engagement-signal equivalent — explicit-for-documentation only.
+     None of these are currently in Pin fanout (Worker is meta-only for them);
+     adding mapping pre-positions them for future fanout enablement. */
   const map = {
     PageView: 'page_visit',
     Purchase: 'checkout',
@@ -128,8 +139,11 @@ function metaEventToPinterest(metaName) {
     ViewCategory: 'view_category',
     Search: 'search',
     Lead: 'lead',
+    Contact: 'lead',
     CompleteRegistration: 'signup',
     Subscribe: 'signup',
+    DeepEngagement: 'custom',
+    TimeOnPage180s: 'custom',
   };
   return map[metaName] || 'custom';
 }

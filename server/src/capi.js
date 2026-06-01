@@ -38,6 +38,9 @@ import { insertRow as bqInsertRow } from './bigquery.js';
 import { pinterestSend } from './pinterest.js';
 import { ga4mpSend } from './ga4mp.js';
 import { handleEvent } from './events.js';
+import { sha256Hex } from './crypto.js';
+import { settledOr } from './utils.js';
+import { metaSend } from './meta.js';
 
 const META_API_VERSION_DEFAULT = 'v21.0';
 const BQ_DATASET_DEFAULT = 'lighom_capi';
@@ -53,6 +56,27 @@ export async function handleCapi(request, env, url) {
   }
   if (url.pathname === '/capi/health') {
     return capiHealth(request, env, url);
+  }
+  /* E1 5/31: CF geo cross-check endpoint for Enricher country freshness.
+     Returns {country, city, region} from CF edge headers. Read-only, no body, no KV.
+     CORS open for storefront fetch. Enricher cross-checks vs persisted cookie. */
+  if (url.pathname === '/capi/geo') {
+    const cors = {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, OPTIONS',
+      'Cache-Control': 'no-store',
+      'Content-Type': 'application/json',
+    };
+    if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
+    const cf = request.cf || {};
+    const country = String(cf.country || request.headers.get('cf-ipcountry') || '').toLowerCase();
+    const city = String(cf.city || request.headers.get('cf-ipcity') || '');
+    const region = String(cf.region || cf.regionCode || request.headers.get('cf-region') || '');
+    return new Response(JSON.stringify({
+      country: /^[a-z]{2}$/.test(country) ? country : null,
+      city: city || null,
+      region: region || null,
+    }), { status: 200, headers: cors });
   }
   // Read-only dedup check for browser Purchase block (B): "has this order's
   // Purchase already been sent to <platform>?" Pure KV.get — never writes/deletes.
@@ -104,61 +128,6 @@ async function handleOrderWebhook(request, env) {
 
   // Shopline may wrap payload in {order:{...}} or send order directly
   const o = order.order || order;
-
-  // DIAG 5/19 (one-shot): capture raw Shopline referrer/source fields to fix
-  // Pinterest first-touch attribution (Shopline Referrer report shows Pinterest
-  // but BQ utm_source=meta_catalog because parseLandingAttribution prefers
-  // landing_site over referring_site). Written to orders.raw_referrer_diag.
-  // Read-only on `o`, never touches metaEvent → zero FB/Meta impact.
-  // Remove this block + column after 1-2 captures.
-  //
-  // DIAG 5/22 (one-shot): also capture the webhook order's recipient nesting.
-  // admin API + thank-you __PRELOAD_STATE__ both expose receiverInfo.receiver*,
-  // but the webhook is a 3rd surface — its exact key/casing is unconfirmed, so
-  // fn/ln/ct/st/zp/country are 0% on every webhook Purchase. `addr_diag` reveals
-  // the real shape so buildMetaEvent's receiver fallback can be finalized.
-  // Read-only; remove this block + the addr_diag key after 1-2 captures.
-  let referrerDiag = null;
-  try {
-    const cdet = o.client_details || o.clientDetails || {};
-    const recvCand = o.receiverInfo || o.receiver_info || o.receiver
-      || o.shipping_address || o.shippingAddress || null;
-    referrerDiag = JSON.stringify({
-      referring_site: o.referring_site,
-      referrer: o.referrer,
-      source_name: o.source_name,
-      source_identifier: o.source_identifier,
-      source_url: o.source_url,
-      landing_site: o.landing_site || o.landingSite,
-      cd_referrer: cdet.referrer,
-      cd_landing_site: cdet.landing_site || cdet.landingSite,
-      client_details_keys: Object.keys(cdet).slice(0, 20),
-      note_attrs: Array.isArray(o.note_attributes)
-        ? o.note_attributes.slice(0, 8)
-        : (o.note_attributes || null),
-      // DIAG 5/22 — recipient-shape capture
-      addr_diag: {
-        o_keys: Object.keys(o).slice(0, 60),
-        customer_keys: o.customer ? Object.keys(o.customer).slice(0, 30) : null,
-        recv_key_used: o.receiverInfo ? 'receiverInfo'
-          : o.receiver_info ? 'receiver_info'
-          : o.receiver ? 'receiver'
-          : o.shipping_address ? 'shipping_address'
-          : o.shippingAddress ? 'shippingAddress' : null,
-        recv_obj: recvCand ? Object.keys(recvCand).slice(0, 40) : null,
-        recv_sample: recvCand ? {
-          fn: recvCand.receiverFirstName ?? recvCand.first_name ?? null,
-          ln: recvCand.receiverLastName ?? recvCand.last_name ?? null,
-          ct: recvCand.receiverCity ?? recvCand.city ?? null,
-          st: recvCand.receiverProvinceCode ?? recvCand.receiverProvince
-            ?? recvCand.province_code ?? recvCand.province ?? null,
-          zp: recvCand.receiverPostcode ?? recvCand.zip ?? null,
-          cc: recvCand.receiverCountryCode ?? recvCand.country_code
-            ?? recvCand.country ?? null,
-        } : null,
-      },
-    }).slice(0, 3000);
-  } catch (_) { referrerDiag = 'DIAG_ERR'; }
 
   if (!env.META_PIXEL_ID || !env.META_CAPI_ACCESS_TOKEN) {
     return jsonResp(500, { ok: false, error: 'missing_secrets' });
@@ -245,10 +214,7 @@ async function handleOrderWebhook(request, env) {
     }
   } catch (_) { /* fail-open: keep fallback event_id */ }
 
-  const apiVersion = env.META_API_VERSION || META_API_VERSION_DEFAULT;
-  const endpoint = `https://graph.facebook.com/${apiVersion}/${env.META_PIXEL_ID}/events`;
-  const payload = { data: [event] };
-  if (env.META_TEST_EVENT_CODE) payload.test_event_code = env.META_TEST_EVENT_CODE;
+  /* D3 5/31: endpoint/payload/test_event_code build moved inside meta.js metaSend(env, event) */
 
   const epik = noteAttrs._epik || noteAttrs.epik || landingInfo.epik || '';
   const customer = o.customer || {};
@@ -264,7 +230,7 @@ async function handleOrderWebhook(request, env) {
   const [metaSettled, pinterestSettled, ga4Settled] = await Promise.allSettled([
     skipMeta
       ? Promise.resolve({ ok: false, skipped: true, reason: 'order_webhook_skips_meta_to_avoid_dedup_loss' })
-      : metaSend(endpoint, env.META_CAPI_ACCESS_TOKEN, payload),
+      : metaSend(env, event),
     skipPinterest
       ? Promise.resolve({ ok: false, skipped: true, reason: 'order_webhook_skips_pinterest_to_avoid_dedup_loss' })
       : pinterestSend(env, event, epik),
@@ -295,7 +261,7 @@ async function handleOrderWebhook(request, env) {
 
   // Phase 2: write single BQ row containing actual statuses from all 3 platforms.
   // (Sequential after fanout adds ~150-200ms but gives full audit trail.)
-  const bqRow = buildBqRow(o, event, { meta, pinterest, google }, landingInfo, referrerDiag);
+  const bqRow = buildBqRow(o, event, { meta, pinterest, google }, landingInfo);
   let bq;
   try {
     bq = env.GCP_SA_JSON
@@ -378,38 +344,17 @@ function parseLandingAttribution(o) {
   return out;
 }
 
-function settledOr(s) {
-  return s.status === 'fulfilled' ? s.value : { ok: false, error: String(s.reason).slice(0, 300) };
-}
+/* settledOr moved to utils.js (D2 consolidation, 5/31) */
 
-async function metaSend(endpoint, token, payload) {
-  let r;
-  try {
-    r = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`,
-      },
-      body: JSON.stringify(payload),
-    });
-  } catch (err) {
-    return { ok: false, error: 'meta_fetch_failed', detail: String(err).slice(0, 300) };
-  }
-  const txt = await r.text();
-  let body = null;
-  try { body = JSON.parse(txt); } catch {}
-  return { ok: r.ok, status: r.status, response: body || txt.slice(0, 500) };
-}
+/* metaSend moved to meta.js (D3 consolidation, 5/31) */
 
 // Build BigQuery row matching the schema in DEPLOY.md Phase 9.
 // Uses already-computed Meta event for hash reuse where possible.
-function buildBqRow(order, metaEvent, dispatches, landingInfo, referrerDiag) {
+function buildBqRow(order, metaEvent, dispatches, landingInfo) {
   const d = dispatches || {};
   const li = landingInfo || {};
   const noteAttrs = extractCartAttrs(order);
   const customer = order.customer || {};
-  const shippingAddr = order.shipping_address || order.shippingAddress || customer.default_address || {};
 
   const ud = metaEvent.user_data || {};
   const cd = metaEvent.custom_data || {};
@@ -460,7 +405,6 @@ function buildBqRow(order, metaEvent, dispatches, landingInfo, referrerDiag) {
     pinterest_response: d.pinterest ? JSON.stringify(d.pinterest).slice(0, 1000) : null,
     google_status: d.google ? (d.google.ok ? 'ok' : (d.google.skipped ? 'skipped' : 'fail')) : null,
     google_response: d.google ? JSON.stringify(d.google).slice(0, 1000) : null,
-    raw_referrer_diag: referrerDiag || null,
   };
 }
 
@@ -496,7 +440,6 @@ async function buildMetaEvent(order, request, landingInfo) {
   // Customer fields (Shopline order/created)
   const customer = order.customer || {};
   const shippingAddr = order.shipping_address || order.shippingAddress || customer.default_address || {};
-  const billingAddr = order.billing_address || order.billingAddress || {};
   const clientDetails = order.client_details || order.clientDetails || {};
   // Shopline's order payload carries the recipient as `receiverInfo` (camelCase,
   // confirmed 2026-05-22 against the admin order API): receiverFirstName /
@@ -572,7 +515,8 @@ async function buildMetaEvent(order, request, landingInfo) {
     title: String(li.title || li.name || li.productName || '').slice(0, 100),
     brand: String(li.vendor || li.brand || 'Lighom'),
     category: String(li.product_category || li.customCategoryName || '').slice(0, 100),
-  })).filter(c => c.id);
+    item_group_id: String(li.productSeq || li.product_id || li.productGroupId || ''),
+  })).map(c => { if (!c.item_group_id) delete c.item_group_id; return c; }).filter(c => c.id);
 
   /* Shopline order.current_total_price is a DOLLARS string, NOT cents.
      Verified 2026-05-18 via PRICE_DIAG on 8 live orders: raw "99.57" = real
@@ -626,15 +570,6 @@ async function buildMetaEvent(order, request, landingInfo) {
 }
 
 // ===== Helpers =====
-
-function arrayToMap(arr) {
-  const m = {};
-  if (!Array.isArray(arr)) return m;
-  for (const it of arr) {
-    if (it && it.name) m[it.name] = it.value;
-  }
-  return m;
-}
 
 // Defensive cart-attributes extraction. Lighom storefront Cart Attrs Injector
 // POSTs to /cart/update.js with `{attributes: {...}}` (Shopify convention,
@@ -695,11 +630,7 @@ function parseEventTime(s) {
   return Math.floor(t / 1000);
 }
 
-async function sha256Hex(s) {
-  const enc = new TextEncoder().encode(s);
-  const buf = await crypto.subtle.digest('SHA-256', enc);
-  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
-}
+/* sha256Hex moved to crypto.js (D1 consolidation, 5/31) */
 
 async function verifyHmacSha256(rawBody, signatureHeader, secret) {
   // Shopline signs the raw body with HMAC-SHA256 + secret.

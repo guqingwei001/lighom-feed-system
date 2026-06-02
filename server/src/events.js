@@ -143,6 +143,12 @@ export async function handleEvent(request, env) {
   if (!userData.country && /^[a-z]{2}$/i.test(cfCountry) && !/^(XX|T1|AP|EU)$/i.test(cfCountry)) {
     userData.country = [await sha256Hex(cfCountry.toLowerCase())];
   }
+  // [6/2] Raw country ISO for BQ analytics. Prefer body.user_data.country if raw 2-char,
+  // else CF geo. Hashed values stay in userData.country for Meta CAPI; this is the
+  // un-hashed mirror so SQL can filter by country='us'.
+  const _rawBodyCountry = (typeof ud.country === 'string' && /^[a-z]{2}$/i.test(ud.country)) ? ud.country.toLowerCase() : '';
+  const countryIsoForBq = _rawBodyCountry
+    || (/^[a-z]{2}$/i.test(cfCountry) && !/^(XX|T1|AP|EU)$/i.test(cfCountry) ? cfCountry.toLowerCase() : null);
   const cfRegion = cf.regionCode || cf.region || request.headers.get('cf-region-code') || request.headers.get('cf-region') || '';
   if (!userData.st && cfRegion) {
     const v = String(cfRegion).toLowerCase().replace(/\s/g, '');
@@ -434,6 +440,7 @@ export async function handleEvent(request, env) {
     st_present: !!arr0(userData.st),
     zp_present: !!arr0(userData.zp),
     country_present: !!(userData.country && (Array.isArray(userData.country) ? userData.country[0] : userData.country)),
+    country_iso: countryIsoForBq,
     fbc: ud.fbc || null,
     fbp: ud.fbp || null,
     epik: ud.epik || null,

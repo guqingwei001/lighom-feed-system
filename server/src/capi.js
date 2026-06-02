@@ -362,6 +362,14 @@ function buildBqRow(order, metaEvent, dispatches, landingInfo) {
   // Hashed pulls from Meta event (single source of truth, already SHA-256'd).
   const arr0 = (v) => Array.isArray(v) && v.length ? v[0] : null;
 
+  // [6/2] country_iso: raw 2-char ISO from shipping. ud.country is SHA-256 (Meta CAPI
+  // requires hashed); the raw form lives here for BQ analytics so SQL can filter by
+  // country='us' without hash lookup tables.
+  const shippingAddr = order.shipping_address || order.shippingAddress || customer.default_address || {};
+  const recv = order.receiverInfo || order.receiver_info || order.receiver || {};
+  const rawCountry = (shippingAddr.country_code || shippingAddr.country || recv.receiverCountryCode || '').toLowerCase().slice(0, 2);
+  const countryIso = /^[a-z]{2}$/.test(rawCountry) ? rawCountry : null;
+
   return {
     event_id: metaEvent.event_id,
     event_time: new Date(metaEvent.event_time * 1000).toISOString(),
@@ -388,6 +396,7 @@ function buildBqRow(order, metaEvent, dispatches, landingInfo) {
     landing_url: li.landingUrl || null,
     data_quality: classifyTestRow(order) ? 'test' : ('webhook:' + (metaEvent.event_name || 'unknown').toLowerCase()),
     country: arr0(ud.country),
+    country_iso: countryIso,
     city_hashed: arr0(ud.ct),
     // [2026-05-21] PII field presence monitoring — mirror of events.js engagements;
     // tracks which user_data fields the webhook successfully assembled for EMQ analysis.

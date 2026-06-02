@@ -5,8 +5,7 @@
   window.__lighom_userdata_enricher_v10 = true;
 
   /* Bot guard — skip Meta/Pinterest/Google crawlers + headless browsers (saves 30-50% sGTM cost) */
-  var BOT_RE = /fbexternalhit|facebookcatalog|FacebookExternalAgent|meta-externalagent|meta-externalfetcher|facebookbot|pinterestbot|googlebot|bingbot|slackbot|twitterbot|linkedinbot|whatsapp|telegrambot|discordbot|applebot|duckduckbot|baiduspider|yandexbot|ahrefsbot|semrushbot|mj12bot|dotbot|crawler|spider|HeadlessChrome|headless|phantom|puppeteer|playwright|gptbot|chatgpt|claudebot|anthropic|perplexity|bytespider|amazonbot/i;
-  if (BOT_RE.test(navigator.userAgent || "") || navigator.webdriver === true) return;
+  if (window.LighomUtil && window.LighomUtil.isBot && window.LighomUtil.isBot()) return; /* D4 5/31 */
 
   var PIXEL_ID = "479292381165317";
   var PINTEREST_TAG_ID = "2614211257021";
@@ -36,12 +35,13 @@
     var now = Date.now();
     var urlParams = new URLSearchParams(window.location.search);
     var fbclid = urlParams.get("fbclid");
-    if (fbclid && !ck("_fbc")) setCk("_fbc", "fb.1." + now + "." + fbclid, 90);
-    if (!ck("_fbp")) {
-      var rand = "";
-      for (var i = 0; i < 19; i++) rand += Math.floor(Math.random() * 10);
-      setCk("_fbp", "fb.1." + now + "." + rand, 90);
+    /* Validate fbclid: real values are 20+ chars opaque base64-like; reject test strings */
+    if (fbclid && fbclid.length >= 20 && !/^[a-z0-9_-]*(test|debug|dev|sample|enricher)/i.test(fbclid) && !ck("_fbc")) {
+      setCk("_fbc", "fb.1." + now + "." + fbclid, 90);
     }
+    /* _fbp NOT synthesized — Math.random produces values that never existed on facebook.com
+       so Meta cannot reverse-match to any FB user. Same class of EMQ pollution as test PII.
+       Let fbevents.js (Self Pixel Base) set _fbp naturally; otherwise send nothing. */
   }
   bootstrapFbpFbc();
 
@@ -73,7 +73,7 @@
   function getStableSharedId(name){
     var lname = String(name).toLowerCase();
     if (lname === 'pagevisit') {
-      if (!__pinPageVisitId) __pinPageVisitId = genSharedId(lname);
+      if (!__pinPageVisitId) __pinPageVisitId = genSharedId(lname); try { window.LIGHOM_PAGEVISIT_ID = __pinPageVisitId; } catch(e){}
       return __pinPageVisitId;
     }
     var key = 'lighom_pin_sid_' + lname + '_' + (window.location && location.pathname || '');
@@ -107,6 +107,7 @@
   function rewritePintrkArgs(args){
     if (!args || args[0] !== 'track' || !args[1]) return 'noop';
     var lname = String(args[1]).toLowerCase();
+    if (lname === 'checkout') return 'noop'; /* 5/28 keep purchase_LIGxxx canonical for browser-CAPI dedup */
     try {
       if (args[2] && args[2].event_id) {
         window.__lighom_pintrk_ids[lname] = String(args[2].event_id);  /* L2 listen */
@@ -182,7 +183,13 @@
     var pre = {};
     FIELDS.forEach(function(f){
       var h = ck(COOKIE_PREFIX + f + "_h") || lsGet(COOKIE_PREFIX + f + "_h");
-      if (h && /^[a-f0-9]{64}$/.test(h)) pre[f] = h;
+      if (h && /^[a-f0-9]{64}$/.test(h)) {
+        var plain = ck(COOKIE_PREFIX + f) || lsGet(COOKIE_PREFIX + f);
+        if (plain && isCleanPII(f, plain)) pre[f] = h;
+        else {
+          try { document.cookie = COOKIE_PREFIX + f + "_h=; path=/; max-age=0; domain=lighom.com"; lsSet(COOKIE_PREFIX + f + "_h", ""); } catch(e){}
+        }
+      }
     });
     if (Object.keys(pre).length) {
       hashedCache = Object.assign({}, hashedCache, pre);
@@ -206,6 +213,11 @@
 
   function sha256(s){
     if (!s || !window.crypto || !crypto.subtle) return Promise.resolve("");
+    /* 5/31 sha256 hex passthrough: if input is already 64-char SHA-256 hex
+       (PII Persist v1 bridge writes hashed values to no-suffix cookies which
+       Enricher then reads back through loadPersisted+norm pipeline), pass
+       through unchanged instead of double-hashing into garbage. */
+    if (/^[a-f0-9]{64}$/i.test(String(s))) return Promise.resolve(String(s).toLowerCase());
     try {
       return crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)).then(function(buf){
         return Array.from(new Uint8Array(buf)).map(function(b){ return b.toString(16).padStart(2,"0"); }).join("");
@@ -213,10 +225,23 @@
     } catch(e){ return Promise.resolve(""); }
   }
 
+  function isCleanPII(field, value){
+    if (!value || typeof value !== "string") return false;
+    var s = String(value).trim();
+    if (s.length < 2) return false;
+    if (/^[\*#\-_]+$/.test(s)) return false;
+    if (/^(test|--no-value--|none|null|undefined|n\/a|placeholder|sample|dummy|fake)$/i.test(s)) return false;
+    if (/@example\.(com|org|net|test)$/i.test(s)) return false;
+    if (/[\*#]{3,}/.test(s)) return false;
+    if (field === "country") { if (!/^[a-z]{2}$/i.test(s)) { /* E2 5/31 country reject diag: log non-alpha country sources for "^^"-type pollution hunt; rate-limit 1/session/value */ try { if (!window.__lighom_country_rejected_diag) window.__lighom_country_rejected_diag = {}; var diagKey = String(value||'').slice(0,20); if (!window.__lighom_country_rejected_diag[diagKey]) { window.__lighom_country_rejected_diag[diagKey] = 1; if (window.LighomUtil && window.LighomUtil.sendCapi) window.LighomUtil.sendCapi({ event_name: 'ClientDiag', event_id: 'diag_country_'+Date.now()+'_'+Math.random().toString(36).slice(2,8), event_time: Math.floor(Date.now()/1000), page_url: location.href, page_path: location.pathname, page_type: 'diag', fanout: [], custom_data: { data_quality: 'lighom_country_reject', country_raw: String(value||'').slice(0,40), normalized: s.slice(0,8), source_hint: 'enricher_persist' } }); } } catch(e){} return false; } }  /* 5/31 country alpha-only check */
+    return true;
+  }
+
   function getInputValue(selector){
     var els = document.querySelectorAll(selector);
     for (var i = 0; i < els.length; i++) {
       var el = els[i];
+      if (el.type === "password") continue;
       var v = el.value || (el.options && el.selectedIndex >= 0 ? (el.options[el.selectedIndex].dataset.code || el.options[el.selectedIndex].text) : "");
       if (v && v.trim()) return v.trim();
     }
@@ -246,7 +271,14 @@
   function loadSession(){
     try {
       var s = ssGet(SESSION_KEY);
-      if (s) return JSON.parse(s);
+      if (s) {
+        var parsed = JSON.parse(s); var clean = {};
+        Object.keys(parsed).forEach(function(k){
+          if (k === "__loaded") clean[k] = parsed[k];
+          else if (isCleanPII(k, parsed[k])) clean[k] = parsed[k];
+        });
+        return clean;
+      }
     } catch(e){}
     return {};
   }
@@ -259,13 +291,22 @@
     var loaded = {};
     FIELDS.forEach(function(f){
       var v = ck(COOKIE_PREFIX + f) || lsGet(COOKIE_PREFIX + f);
-      if (v) loaded[f] = v;
+      if (v && isCleanPII(f, v)) loaded[f] = v;
+      else {
+        try { document.cookie = COOKIE_PREFIX + f + "=; path=/; max-age=0; domain=lighom.com"; document.cookie = COOKIE_PREFIX + f + "_h=; path=/; max-age=0; domain=lighom.com"; lsSet(COOKIE_PREFIX + f, ""); lsSet(COOKIE_PREFIX + f + "_h", ""); } catch(e){}
+      }
     });
     return loaded;
   }
   function persist(field, value){
-    if (!value) return;
-    setCk(COOKIE_PREFIX + field, value, COOKIE_DAYS);
+    if (!value || !isCleanPII(field, value)) {
+      try { setCk(COOKIE_PREFIX + field, "", -1); lsSet(COOKIE_PREFIX + field, ""); } catch(e){}
+      try { setCk(COOKIE_PREFIX + field + "_h", "", -1); lsSet(COOKIE_PREFIX + field + "_h", ""); } catch(e){}
+      return;
+    }
+    /* 5/31 country freshness: 30d TTL for country (vs 365d for other fields) — bounds maximum staleness window. Auto-refresh next time Enricher reads a fresh form value. */
+    var _ttl = (field === "country") ? 30 : COOKIE_DAYS;
+    setCk(COOKIE_PREFIX + field, value, _ttl);
     lsSet(COOKIE_PREFIX + field, value);
   }
 
@@ -321,7 +362,7 @@
     }
     if (!uid) {
       var ps = window.__PRELOAD_STATE__;
-      uid = (ps && ps.user && (ps.user.id || ps.user.userId)) || (ps && ps.userInfo && ps.userInfo.userId) || (ps && ps.orders && ps.orders.buyerInfo && ps.orders.buyerInfo.buyerId);
+      uid = (ps && ps.user && (ps.user.id || ps.user.userId)) || (ps && ps.userInfo && ps.userInfo.userId) || (ps && ps.orders && ps.orders.buyerInfo && ps.orders.buyerInfo.buyerId) || (ps && ps.checkout && ps.checkout.buyerInfo && ps.checkout.buyerInfo.buyerId) /* 6/2: /checkouts/ logged-in buyer */;
       uid = uid ? String(uid) : "";
     }
     if (!uid) uid = ck("customer_id") || ck("sl_customer_id") || ck("buyer_id") || "";
@@ -343,7 +384,8 @@
         }
       } catch(e){}
     }
-    /* v9: device UUID fallback for external_id when no real customer ID + no prior cookie. */
+    /* DISABLED 2026-05-23: UUID fallback removed. UUIDs never match a FB user → 100% coverage but 0% match.
+       Only real Shopline customer.id (digit-only) goes to Meta/Pin CAPI. Dedup browser↔CAPI uses event_id. */
     if (!uid && !rawCache.external_id) {
       if (window.crypto && typeof crypto.randomUUID === 'function') {
         uid = crypto.randomUUID();
@@ -376,7 +418,8 @@
       var newHashed = {};
       keys.forEach(function(k, i){ if (hashes[i]) newHashed[k] = hashes[i]; });
       /* Merge URL-supplied pre-hashed values (they win over computed) */
-      Object.keys(hashedCache).forEach(function(k){ if (hashedCache[k]) newHashed[k] = hashedCache[k]; });
+      /* 6/2 stale _h fix: computed (newHashed from rawCache) wins over stored (hashedCache from _h cookies). Stored only fills gaps when computed empty (URL-supplied _h without raw equivalent). Reason: stale device-UUID-era _h cookies were overriding fresh real-customer-ID computed hashes; Meta CAPI received stale hashed_external_id never matching real customer. */
+      Object.keys(hashedCache).forEach(function(k){ if (hashedCache[k] && !newHashed[k]) newHashed[k] = hashedCache[k]; });
       hashedCache = newHashed;
       /* C-fix v8: persist hashed cookies (_h suffix) for sync seeding next page load */
       Object.keys(newHashed).forEach(function(f){
@@ -410,6 +453,11 @@
           ["em","ph","fn","ln","ct","st","zp","country","external_id","ge"].forEach(function(k){
             if (normRaw[k]) pinUserData[k] = normRaw[k];
           });
+          /* [2026-05-26 v2] external_id 回 plain — Pinterest "Automatic Enhanced Match"
+             官方: "All values are hashed in the browser using SHA-256 prior to being sent."
+             JS tag 自动 hash external_id (同 em), 发 hashed 会双重 hash → CAPI mismatch.
+             Worker pinterest.js 端单独 hash 满足 CAPI spec; 两端最终都到 Pinterest 后台
+             相同 hash 值. */
           if (Object.keys(pinUserData).length) {
             try { window.pintrk("set", pinUserData); } catch(e){}
           }
@@ -486,6 +534,17 @@
   }
 
   function start(){
+    /* E1 5/31: CF geo cross-check — Worker /capi/geo returns CF-IPCountry edge value; if differs from stored country (or stored empty), refresh via persist() so AAM tracks current location not stale residual. Defensive: any failure silent. */
+    try {
+      fetch('https://lighom-feed-server.dikecarmem750.workers.dev/capi/geo', { credentials: 'omit', method: 'GET' })
+        .then(function(r){ return r.ok ? r.json() : null; })
+        .then(function(g){
+          if (!g || !g.country) return;
+          var stored = ck(COOKIE_PREFIX + 'country');
+          if (stored !== g.country) { try { persist('country', g.country); } catch(e){} }
+        })
+        .catch(function(){});
+    } catch(e){}
     scanDOM();
     /* Initial fbq init (only with data; empty init pollutes Meta diagnostic) */
     if (typeof window.fbq === "function" && Object.keys(rawCache).filter(function(k){ return k !== "__loaded"; }).length) {

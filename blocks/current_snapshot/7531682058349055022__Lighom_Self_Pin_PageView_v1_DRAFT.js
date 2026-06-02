@@ -58,12 +58,12 @@
         method: "POST", credentials: "omit", keepalive: true,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          event_name: "PageView", event_id: event_id,
+          event_name: "PageView", event_id: event_id, pinterest_event_id: (window.LIGHOM_PAGEVISIT_ID || event_id),
           event_time: Math.floor(Date.now()/1000),
           event_source_url: location.href, page_url: location.href, page_path: location.pathname,
           page_type: pageType(),
           fanout: ["pinterest"],
-          utm: { source: ck("last_utm_source")||ck("first_utm_source")||"", medium: ck("last_utm_medium")||ck("first_utm_medium")||"", campaign: ck("last_utm_campaign")||ck("first_utm_campaign")||"" },
+          utm: (window.LighomUtil && window.LighomUtil.utm) ? window.LighomUtil.utm() : { source: '', medium: '', campaign: '' } /* D6 5/31 */,
           user_data: ud,
           custom_data: { data_quality: "self_pin_v1:pv" }
         })

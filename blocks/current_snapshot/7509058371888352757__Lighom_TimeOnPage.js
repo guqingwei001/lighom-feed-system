@@ -9,8 +9,7 @@
 (function(){
   if (window.__lighom_top_v6) return;
   window.__lighom_top_v6 = true;
-  var BOT_RE = /fbexternalhit|facebookcatalog|FacebookExternalAgent|meta-externalagent|meta-externalfetcher|facebookbot|pinterestbot|googlebot|bingbot|crawler|spider|HeadlessChrome|headless|phantom|puppeteer|playwright|gptbot|chatgpt|claudebot|anthropic|perplexity|bytespider|amazonbot/i;
-  if (BOT_RE.test(navigator.userAgent || "") || navigator.webdriver === true) return;
+  if (window.LighomUtil && window.LighomUtil.isBot && window.LighomUtil.isBot()) return; /* D4 5/31 */
 
   function ck(name){ var m=document.cookie.match(new RegExp('(?:^|;\\s*)'+name+'=([^;]+)')); return m?decodeURIComponent(m[1]):''; }
   function isProductPath(){ return /^\/products\//.test(location.pathname); }
@@ -102,11 +101,7 @@
             external_id: (window.__lighom_user_data_raw && window.__lighom_user_data_raw.external_id) || ''
           },
           custom_data: { content_type: 'engagement', time_seconds: 180, content_ids: pid ? [pid] : undefined },
-          utm: {
-            source: ck('last_utm_source') || ck('first_utm_source'),
-            medium: ck('last_utm_medium') || ck('first_utm_medium'),
-            campaign: ck('last_utm_campaign') || ck('first_utm_campaign')
-          }
+          utm: (window.LighomUtil && window.LighomUtil.utm) ? window.LighomUtil.utm() : { source: '', medium: '', campaign: '' } /* D6 5/31 */
         })
       }).catch(function(){});
     } catch(e){}

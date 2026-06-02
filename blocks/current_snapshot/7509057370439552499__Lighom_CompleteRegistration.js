@@ -7,8 +7,7 @@
 (function(){
   if (window.__lighom_cr_v2) return;
   window.__lighom_cr_v2 = true;
-  var BOT_RE = /fbexternalhit|facebookcatalog|FacebookExternalAgent|meta-externalagent|meta-externalfetcher|facebookbot|pinterestbot|googlebot|bingbot|crawler|spider|HeadlessChrome|headless|phantom|puppeteer|playwright|gptbot|chatgpt|claudebot|anthropic|perplexity|bytespider|amazonbot/i;
-  if (BOT_RE.test(navigator.userAgent || "") || navigator.webdriver === true) return;
+  if (window.LighomUtil && window.LighomUtil.isBot && window.LighomUtil.isBot()) return; /* D4 5/31 */
 
   function ck(n){ var m=document.cookie.match(new RegExp("(?:^|;\\s*)"+n+"=([^;]+)")); return m?decodeURIComponent(m[1]):""; }
 
@@ -74,15 +73,11 @@
         user_data: {
           em: em, ph: ph, fn: fn, ln: ln,
           fbc: ck('_fbc'), fbp: ck('_fbp'),
-          epik: ck('_epik'), ttclid: ck('_ttp'),
+          epik: ck('_epik'), ttclid: ck('_lighom_ttclid') || ck('_ttp'), /* 5/31 ttclid cookie rename (#9) — primary _lighom_ttclid, fallback _ttp for sessions captured pre-rename */
           ga_cookie: ck('_ga'), client_ua: navigator.userAgent
         },
         custom_data: params,
-        utm: {
-          source: ck('last_utm_source') || ck('first_utm_source') || '',
-          medium: ck('last_utm_medium') || ck('first_utm_medium') || '',
-          campaign: ck('last_utm_campaign') || ck('first_utm_campaign') || ''
-        }
+        utm: (window.LighomUtil && window.LighomUtil.utm) ? window.LighomUtil.utm() : { source: '', medium: '', campaign: '' } /* D6 5/31 */
       })
     }).catch(function(){});
   } catch(e){}

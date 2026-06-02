@@ -40,7 +40,7 @@
           event_source_url: location.href, page_url: location.href, page_path: location.pathname,
           page_type: "search",
           fanout: ["meta"],
-          utm: { source: ck("last_utm_source")||ck("first_utm_source")||"", medium: ck("last_utm_medium")||ck("first_utm_medium")||"", campaign: ck("last_utm_campaign")||ck("first_utm_campaign")||"" },
+          utm: (window.LighomUtil && window.LighomUtil.utm) ? window.LighomUtil.utm() : { source: '', medium: '', campaign: '' } /* D6 5/31 */,
           user_data: ud,
           custom_data: Object.assign({}, p, { data_quality: "self_pixel_v2:search" })
         })

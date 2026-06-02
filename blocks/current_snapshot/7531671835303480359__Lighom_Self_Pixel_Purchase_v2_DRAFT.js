@@ -24,7 +24,7 @@
      Gate: skip if order paid > 48h ago. Reads basic.{payTime,paidAt,createdAt,transTime}
      as ms or sec. If no timestamp field → fire (defensive default for unknown schema). */
   function _staleOrderMs(basic){
-    var ts = (basic && (basic.payTime || basic.paidAt || basic.createdAt || basic.transTime)) || 0;
+    var ts = (basic && (basic.createTime || basic.orderTime || basic.createAt || basic.orderAt)) || 0 /* 6/2 real field names — Shopline 用 createTime/orderTime 不用 payTime/paidAt */;
     var ms = typeof ts === "number" ? ts : (ts ? new Date(ts).getTime() : 0);
     if (!ms || isNaN(ms)) return 0;
     if (ms < 1e12) ms = ms * 1000; /* sec → ms */
@@ -55,12 +55,12 @@
       id: pickId(it), quantity: it.productNum || 1,
       item_price: (it.finalPrice || it.productPrice || 0) / 100,
       title: String(it.productName || it.title || "").slice(0, 100),
-      brand: "Lighom",
-      category: String(it.customCategoryName || "").slice(0, 100)
+      brand: "Lighom", item_group_id: String(it.product_id||it.productSeq||it.productGroupId||""),
+      category: String(it.customCategoryName||it.product_custom_type||(it.product&&(it.product.type||it.product.category))||it.product_type||it.category||"").slice(0, 100) /* 5/31 Purchase category fallback */
     }; });
     var num_items = items.reduce(function(s, it){ return s + (it.productNum || 1); }, 0);
     var content_name = items.map(function(it){ return String(it.productName || it.title || ""); }).filter(Boolean).join(", ").slice(0, 200);
-    var topCat = items[0] && items[0].customCategoryName ? String(items[0].customCategoryName).slice(0, 100) : "";
+    var topCat = items[0] && String(items[0].customCategoryName||items[0].product_custom_type||(items[0].product&&(items[0].product.type||items[0].product.category))||items[0].product_type||items[0].category||"").slice(0, 100); /* 5/31 Purchase category fallback */
 
     var event_id = ("purchase_" + orderId);
 
@@ -87,10 +87,10 @@
         return Array.from(new Uint8Array(buf)).map(function(b){return b.toString(16).padStart(2,'0');}).join('');
       });
     }
-    var rawEm = String(buyer.email || '').trim().toLowerCase();
-    var rawPh = String(buyer.phone || recv.phone || '').replace(/\D/g, '');
-    var rawFn = String(recv.firstName || recv.first_name || buyer.firstName || '').trim().toLowerCase();
-    var rawLn = String(recv.lastName || recv.last_name || buyer.lastName || '').trim().toLowerCase();
+    var rawEm = String(buyer.buyerEmail || buyer.email || '').trim().toLowerCase();
+    var rawPh = String(buyer.buyerPhone || recv.receiverMobile || buyer.phone || recv.phone || '').replace(/\D/g, '');
+    var rawFn = String(buyer.buyerFirstName || recv.receiverFirstName || recv.firstName || buyer.firstName || '').trim().toLowerCase();
+    var rawLn = String(buyer.buyerLastName || recv.receiverLastName || recv.lastName || buyer.lastName || '').trim().toLowerCase();
     var udReady = Promise.all([
       (rawEm && !ud.em) ? _sha256Hex(rawEm) : Promise.resolve(''),
       (rawPh && !ud.ph) ? _sha256Hex(rawPh) : Promise.resolve(''),
@@ -118,7 +118,7 @@
               event_source_url: location.href, page_url: location.href, page_path: location.pathname,
               page_type: "thank_you",
               fanout: ["meta"],
-              utm: { source: ck("last_utm_source")||ck("first_utm_source")||"", medium: ck("last_utm_medium")||ck("first_utm_medium")||"", campaign: ck("last_utm_campaign")||ck("first_utm_campaign")||"" },
+              utm: (window.LighomUtil && window.LighomUtil.utm) ? window.LighomUtil.utm() : { source: '', medium: '', campaign: '' } /* D6 5/31 */,
               user_data: ud,
               custom_data: Object.assign({}, p, { data_quality: "self_pixel_v2:purchase" })
             })

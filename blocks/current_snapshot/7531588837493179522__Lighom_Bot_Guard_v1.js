@@ -43,14 +43,11 @@
          design (no extension API on mobile). Without this gate the next two checks
          would block all mobile Chrome users — catastrophic FP. */
       var isMobile = /Mobile|Android|iPhone|iPad|iPod|webOS|Opera Mini|IEMobile/i.test(ua) || (navigator.userAgentData && navigator.userAgentData.mobile === true);
-      /* chrome.runtime undefined: corroborate with connection anomaly to avoid FP
-         on enterprise IT --disable-extensions users (normal home/office connection = pass).
-         playwright stealth shows rtt~350/3g; real corporate Chrome shows rtt<200/4g. */
-      var __conn = navigator.connection;
-      var __anom = !__conn || __conn.effectiveType !== "4g" || (typeof __conn.rtt === "number" && __conn.rtt > 200);
-      if (!isMobile && chromeUA && window.chrome && typeof window.chrome.runtime === "undefined" && __anom) return true;
-      if (!isMobile && chromeUA && navigator.plugins && navigator.plugins.length === 0) return true;
-      return false;
+      /* [2026-05-27] chrome.runtime+rtt 检测 + plugins=0 检测全删 — 实证误杀严重:
+         5/22 daily_health bot_fp_users=87 (bot_pct=10.2%), 5/26 checkout 页全店真用户 IC=0.
+         保留检测: webdriver / UA 黑名单 / documentElement webdriver / cdc_ + __driver + __selenium globals.
+         (上一版本注释里 cdc_ 后跟斜杠星导致提前关注释,JS syntax error,刚 fix.) */
+            return false;
     } catch (e) { return false; }
   }
   var bot = isBot();

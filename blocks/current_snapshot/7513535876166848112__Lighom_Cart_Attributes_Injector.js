@@ -3,8 +3,7 @@
 (function(){
   if (window.__lighom_cart_attrs_v1) return;
   window.__lighom_cart_attrs_v1 = true;
-  var BOT_RE = /fbexternalhit|facebookcatalog|FacebookExternalAgent|meta-externalagent|meta-externalfetcher|facebookbot|pinterestbot|googlebot|bingbot|slackbot|twitterbot|linkedinbot|whatsapp|telegrambot|discordbot|applebot|duckduckbot|baiduspider|yandexbot|ahrefsbot|semrushbot|mj12bot|dotbot|crawler|spider|HeadlessChrome|headless|phantom|puppeteer|playwright/i;
-  if (BOT_RE.test(navigator.userAgent || "") || navigator.webdriver === true) return;
+  if (window.LighomUtil && window.LighomUtil.isBot && window.LighomUtil.isBot()) return; /* D4 5/31 */
   function ck(n){ var m = document.cookie.match(new RegExp("(?:^|;\\s*)" + n + "=([^;]+)")); return m ? decodeURIComponent(m[1]) : ""; }
   function buildAttrs(){
     var a = {};

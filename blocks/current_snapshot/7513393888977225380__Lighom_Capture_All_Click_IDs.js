@@ -11,8 +11,7 @@
   window.__lighom_capture_clickids_v3_1 = true;
 
   /* Bot guard */
-  var BOT_RE = /fbexternalhit|facebookcatalog|FacebookExternalAgent|meta-externalagent|meta-externalfetcher|facebookbot|facebookcrawler|fb_iab|fbav|fbavbot|metabot|fb\-extagent|pinterestbot|pinterest_fetcher|googlebot|googleother|googleadsbot|adsbot\-google|google\-extended|bingbot|adidxbot|bingpreview|slackbot|twitterbot|tweetmemebot|linkedinbot|whatsapp|telegrambot|discordbot|applebot|applenewsbot|duckduckbot|baiduspider|yandexbot|yandeximages|ahrefsbot|semrushbot|mj12bot|dotbot|petalbot|seekport|cluebot|amazonbot|amazon\-route53|gptbot|chatgpt|claudebot|claude\-web|anthropic|perplexity|perplexitybot|bytespider|tiktokspider|crawler|spider|HeadlessChrome|headless|phantom|puppeteer|playwright|webdriverio|cypress/i;
-  if (BOT_RE.test(navigator.userAgent || "") || navigator.webdriver === true) return;
+  if (window.LighomUtil && window.LighomUtil.isBot && window.LighomUtil.isBot()) return; /* D4 5/31 */
 
   var DAYS_90 = 90 * 86400;
   var DAYS_400 = 730 * 86400;
@@ -65,11 +64,9 @@
     window.dataLayer = window.dataLayer || [];
     window.dataLayer.push({ fbc: fbc });
   }
-  if (!getCookie("_fbp")) {
-    var rand = "";
-    for (var i = 0; i < 19; i++) rand += Math.floor(Math.random() * 10);
-    setCookie("_fbp", "fb.1." + now + "." + rand, DAYS_90);
-  }
+  /* [2026-05-26] _fbp 合成已删——Meta 官方+多方权威源均指出"do not fabricate".
+     合成的 Math.random fbp 无法关联 Meta 用户 graph,属 EMQ pollution. 让 Self Pixel Base v1
+     加载 fbevents.js 后由 Meta SDK 自然创建真 _fbp(典型 200-400ms 内就绪). */
 
   /* === Google gclid â _gcl_aw === */
   var gclid = params.get("gclid");
@@ -106,7 +103,8 @@
 
   /* === TikTok ttclid === */
   var ttclid = params.get("ttclid");
-  var tt = syncClickId("_ttp", ttclid || "", DAYS_90);
+  /* 5/31 ttclid cookie rename (#9): _ttp namespace collides with TikTok Pixel's own anon-id cookie (TikTok Pixel overwrites _ttp on load). Use _lighom_ prefixed namespace to avoid stomping. */
+  var tt = syncClickId("_lighom_ttclid", ttclid || "", DAYS_90);
   if (tt && ttclid) {
     window.dataLayer = window.dataLayer || [];
     window.dataLayer.push({ ttclid: ttclid });

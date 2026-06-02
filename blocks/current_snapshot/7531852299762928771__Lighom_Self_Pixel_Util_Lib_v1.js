@@ -12,15 +12,17 @@
   function collectHashedPII(ud, prefix, exclude){
     var P = prefix || "_lighom_user_";
     var skip = (exclude && exclude.length) ? exclude : [];
-    ["em","ph","fn","ln","ct","st","zp","country","db","ge","external_id"].forEach(function(f){
+    ["em","ph","fn","ln","ct","st","zp","country","db","ge"].forEach(function(f){
       if (skip.indexOf(f) !== -1) return;
       var h = hxOnly(ck(P + f + "_h"));
       if (h) ud[f] = h;
     });
-    if (!ud.external_id && skip.indexOf("external_id") === -1) {
-      var G = window.__lighom_user_data_hashed;
-      if (G && G.external_id) ud.external_id = G.external_id;
-      else { var ex = ck(P + "external_id"); if (ex) ud.external_id = ex; }
+    /* [2026-05-26] external_id: prefer RAW cookie. Meta CAPI 接 plain ("no hash required").
+       Pinterest CAPI 在 Worker pinterest.js 层 sha256. 不读 hashed (会被 Worker gate 拒). */
+    if (skip.indexOf("external_id") === -1) {
+      /* 5/31 ext_id _h fallback: PII Persist bridge writes hashed to _h suffix now (root fix). No-suffix only has raw if active session wrote it; for returning customer it's empty. Fall back to _h cookie — Worker events.js (HEX64 passthrough fix #2a) and pinterest.js (already-hashed detect) both accept 64-hex external_id. */
+      var ex = ck(P + "external_id") || ck(P + "external_id_h");
+      if (ex) ud.external_id = ex;
     }
     if (skip.indexOf("fb_login_id") === -1) {
       var fblid = ck(P + "fb_login_id");
@@ -66,6 +68,37 @@
       });
     } catch(e){ /* fail-open */ }
   }
-  window.LighomUtil = { ck: ck, hxOnly: hxOnly, lsClick: lsClick, collectHashedPII: collectHashedPII, buildUserData: buildUserData, logErr: logErr };
+  /* D4/D5/D6/D7 helpers added 5/31 */
+  function mergeUd(){
+    var udH = window.__lighom_user_data_hashed || {};
+    var udR = window.__lighom_user_data_raw || {};
+    var out = {};
+    ['em','ph','fn','ln','ct','st','zp','country','external_id'].forEach(function(k){
+      if (udH[k]) out[k] = udH[k];
+      else if (udR[k]) out[k] = udR[k];
+    });
+    return out;
+  }
+  function utm(){
+    return {
+      source: ck('last_utm_source') || ck('first_utm_source') || '',
+      medium: ck('last_utm_medium') || ck('first_utm_medium') || '',
+      campaign: ck('last_utm_campaign') || ck('first_utm_campaign') || ''
+    };
+  }
+  var _BOT_RE = /fbexternalhit|facebookcatalog|FacebookExternalAgent|meta-externalagent|meta-externalfetcher|facebookbot|facebookcrawler|fb_iab|fbav|fbavbot|metabot|fb\-extagent|pinterestbot|pinterest_fetcher|googlebot|googleother|googleadsbot|adsbot\-google|google\-extended|bingbot|adidxbot|bingpreview|slackbot|twitterbot|tweetmemebot|linkedinbot|whatsapp|telegrambot|discordbot|applebot|applenewsbot|duckduckbot|baiduspider|yandexbot|yandeximages|ahrefsbot|semrushbot|mj12bot|dotbot|petalbot|seekport|cluebot|amazonbot|amazon\-route53|gptbot|chatgpt|claudebot|claude\-web|anthropic|perplexity|perplexitybot|bytespider|tiktokspider|crawler|spider|HeadlessChrome|headless|phantom|puppeteer|playwright|webdriverio|cypress/i;
+  function isBot(){ return _BOT_RE.test(navigator.userAgent || '') || navigator.webdriver === true; }
+  var WORKER_CAPI = 'https://lighom-feed-server.dikecarmem750.workers.dev/capi/event';
+  function sendCapi(body){
+    try {
+      return fetch(WORKER_CAPI, {
+        method: 'POST', credentials: 'omit', keepalive: true,
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify(body)
+      }).catch(function(){});
+    } catch(e){ return Promise.resolve(); }
+  }
+
+  window.LighomUtil = { ck: ck, hxOnly: hxOnly, lsClick: lsClick, collectHashedPII: collectHashedPII, buildUserData: buildUserData, logErr: logErr, mergeUd: mergeUd, utm: utm, isBot: isBot, sendCapi: sendCapi };
 })();
 </script>

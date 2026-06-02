@@ -43,15 +43,31 @@
     return vs.find(function(v){ return v.available !== false; }) || vs[0];
   }
   function getProductCategory(){
-    /* 从 ld+json 取 product category (BreadcrumbList 或 Product.category) */
+    /* 5/31 fix: DOM breadcrumb 优先(真分类) → BreadcrumbList 中段 → Product.category → OG meta */
+    try {
+      var bc = document.querySelector('[class*="breadcrumb" i], nav[aria-label*="breadcrumb" i]');
+      if (bc) {
+        var txt = (bc.textContent||'').replace(/\s+/g,' ').trim();
+        var parts = txt.split(/\s*[\/>›»→]\s*/).map(function(s){return s.trim();}).filter(Boolean);
+        var prodH = ((document.querySelector("h1")||{}).textContent||'').trim();
+        var cats = parts.filter(function(p){ return p && p!=='Lighom' && p!=='Home' && p!==prodH && p.length<60; });
+        if (cats.length) return cats.join(' > ').slice(0,100);
+      }
+    } catch(e){window.LighomUtil&&window.LighomUtil.logErr&&window.LighomUtil.logErr("FB VC v2",e);}
     try {
       var els = document.querySelectorAll('script[type="application/ld+json"]');
       for (var i=0;i<els.length;i++){
         var d = JSON.parse(els[i].textContent || "{}");
+        if (d['@type']==='BreadcrumbList' && Array.isArray(d.itemListElement) && d.itemListElement.length>=3) {
+          var mid = d.itemListElement.slice(1,-1).map(function(b){return b.name;}).filter(Boolean);
+          if (mid.length) return mid.join(' > ').slice(0,100);
+        }
         var c = d && (d.category || (d["@graph"] && d["@graph"].find && (d["@graph"].find(function(x){return x.category;}) || {}).category));
         if (c) return String(c).slice(0,100);
       }
     } catch(e){window.LighomUtil&&window.LighomUtil.logErr&&window.LighomUtil.logErr("FB VC v2",e);}
+    var og = document.querySelector('meta[property="product:category"]');
+    if (og && og.content) return og.content.slice(0,100);
     return "";
   }
   function buildVariantParams(variant){
@@ -59,8 +75,14 @@
     var sku = String(variant.id || variant.sku || "");
     var price = Number(variant.price || 0) / 100;
     var prodName = "";
-    try { prodName = (document.querySelector("h1") || {}).textContent || ""; } catch(e){window.LighomUtil&&window.LighomUtil.logErr&&window.LighomUtil.logErr("FB VC v2",e);}
-    var contentName = decodeEnt(variant.product_title || variant.title || prodName).trim().slice(0,100);
+    try { prodName = ((document.querySelector("h1")||{}).textContent||"").trim(); } catch(e){window.LighomUtil&&window.LighomUtil.logErr&&window.LighomUtil.logErr("FB VC v2",e);}
+    /* 5/31 fix: h1(产品名) 优先, append 变体限定(如 "Orange / 60") */
+    var vQual = String(variant.title||"").trim();
+    var contentName = (function(){
+      var base = prodName || variant.product_title || vQual;
+      if (prodName && vQual && !/^default title$/i.test(vQual) && prodName.indexOf(vQual)===-1) return decodeEnt(prodName + ' - ' + vQual).slice(0,100);
+      return decodeEnt(base).slice(0,100);
+    })();
     var contentCategory = getProductCategory();
     return {
       content_type: "product",
@@ -68,9 +90,10 @@
       contents: [{
         id: sku, quantity: 1,
         item_price: Math.round(price * 100) / 100,
-        title: String(variant.title || contentName).slice(0,100),
+        title: contentName,
         brand: "Lighom",
-        category: contentCategory
+        category: contentCategory,
+        item_group_id: (function(){ var og=document.querySelector('meta[property="product:item_group_id"]'); return og?og.content:""; })()
       }],
       content_name: contentName,
       content_category: contentCategory,
@@ -114,11 +137,7 @@
           page_url: location.href, page_path: location.pathname,
           page_type: "product",
           fanout: ["meta"],
-          utm: {
-            source: ck("last_utm_source") || ck("first_utm_source") || "",
-            medium: ck("last_utm_medium") || ck("first_utm_medium") || "",
-            campaign: ck("last_utm_campaign") || ck("first_utm_campaign") || ""
-          },
+          utm: (window.LighomUtil && window.LighomUtil.utm) ? window.LighomUtil.utm() : { source: '', medium: '', campaign: '' } /* D6 5/31 */,
           user_data: ud,
           custom_data: Object.assign({}, params, { data_quality: "self_pixel_v2:vc" })
         })
@@ -136,8 +155,10 @@
       }, 150);
     }
   }
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", go);
-  else go();
+  /* 5/30 fix: wait for _fbp cookie before firing init, mirror PV v1 pattern (max 6s) */
+  function _waitFbpThen(fn){ var n = 0; (function c(){ if (ck("_fbp") || ++n > 40) return fn(); setTimeout(c, 150); })(); }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", function(){ _waitFbpThen(go); });
+  else _waitFbpThen(go);
 
   /* 变体切换 3s debounce 重发 (新 sku 触发新 event_id) */
   var changeTimer = null;

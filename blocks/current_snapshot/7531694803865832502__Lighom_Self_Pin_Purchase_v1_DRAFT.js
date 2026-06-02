@@ -4,10 +4,13 @@
    event_id 与 FB Purchase v2 同公式 (SEID+canonical),webhook/native rollback 锚保留
    localStorage 防同单重发 */
 (function _gateRetry(){if(typeof window.LIGHOM_SELF_PIXEL_LIVE==="undefined")return setTimeout(_gateRetry,30);if(typeof window.LighomUtil==="undefined")return setTimeout(_gateRetry,30);
+  /* 5/31 Pin Purchase diag REMOVED — was 4 _d() calls leaking ClientDiag noise to BQ per memory project_lighom_pin_v1_diag_5_28 (cleanup not done in original fix) */
+  
   if (!window.LIGHOM_SELF_PIXEL_LIVE) return;
   if (window.__lighom_selfpin_purchase_v1) return;
   window.__lighom_selfpin_purchase_v1 = true;
   if (window.__lighomIsBot) return;
+  
 
   var WORKER = "https://lighom-feed-server.dikecarmem750.workers.dev/capi/event";
   var P = "_lighom_user_";
@@ -23,7 +26,7 @@
      Reads basic.{payTime,paidAt,createdAt,transTime} as ms or sec. If no timestamp
      field → fire (defensive default). */
   function _staleOrderMs(basic){
-    var ts = (basic && (basic.payTime || basic.paidAt || basic.createdAt || basic.transTime)) || 0;
+    var ts = (basic && (basic.createTime || basic.orderTime || basic.createAt || basic.orderAt)) || 0 /* 6/2 real field names — Shopline 用 createTime/orderTime 不用 payTime/paidAt */;
     var ms = typeof ts === "number" ? ts : (ts ? new Date(ts).getTime() : 0);
     if (!ms || isNaN(ms)) return 0;
     if (ms < 1e12) ms = ms * 1000;
@@ -54,8 +57,8 @@
     var line_items = items.map(function(it){ return {
       product_id: pickId(it),
       product_name: String(it.productName || it.title || "").slice(0, 100),
-      product_category: String(it.customCategoryName || "").slice(0, 100),
-      product_brand: "Lighom",
+      product_category: String(it.customCategoryName||it.product_custom_type||(it.product&&(it.product.type||it.product.category))||it.product_type||it.category||"").slice(0, 100) /* 5/31 Purchase category fallback */,
+      product_brand: "Lighom", item_group_id: String(it.product_id||it.productSeq||it.productGroupId||""),
       product_quantity: it.productNum || 1,
       product_price: (it.finalPrice || it.productPrice || 0) / 100
     }; });
@@ -63,8 +66,8 @@
       id: pickId(it), quantity: it.productNum || 1,
       item_price: (it.finalPrice || it.productPrice || 0) / 100,
       title: String(it.productName || it.title || "").slice(0, 100),
-      brand: "Lighom",
-      category: String(it.customCategoryName || "").slice(0, 100)
+      brand: "Lighom", item_group_id: String(it.product_id||it.productSeq||it.productGroupId||""),
+      category: String(it.customCategoryName||it.product_custom_type||(it.product&&(it.product.type||it.product.category))||it.product_type||it.category||"").slice(0, 100) /* 5/31 Purchase category fallback contents */
     }; });
     var content_ids = items.map(pickId).filter(Boolean);
     var num_items = items.reduce(function(s, it){ return s + (it.productNum || 1); }, 0);
@@ -82,10 +85,10 @@
         return Array.from(new Uint8Array(buf)).map(function(b){return b.toString(16).padStart(2,'0');}).join('');
       });
     }
-    var rawEm = String(buyer.email || '').trim().toLowerCase();
-    var rawPh = String(buyer.phone || recv.phone || '').replace(/\D/g, '');
-    var rawFn = String(recv.firstName || recv.first_name || buyer.firstName || '').trim().toLowerCase();
-    var rawLn = String(recv.lastName || recv.last_name || buyer.lastName || '').trim().toLowerCase();
+    var rawEm = String(buyer.buyerEmail || buyer.email || '').trim().toLowerCase();
+    var rawPh = String(buyer.buyerPhone || recv.receiverMobile || buyer.phone || recv.phone || '').replace(/\D/g, '');
+    var rawFn = String(buyer.buyerFirstName || recv.receiverFirstName || recv.firstName || buyer.firstName || '').trim().toLowerCase();
+    var rawLn = String(buyer.buyerLastName || recv.receiverLastName || recv.lastName || buyer.lastName || '').trim().toLowerCase();
     var udReady = Promise.all([
       (rawEm && !ud.em) ? _sha256Hex(rawEm) : Promise.resolve(''),
       (rawPh && !ud.ph) ? _sha256Hex(rawPh) : Promise.resolve(''),
@@ -102,16 +105,6 @@
 
     function actuallyFire(){
       udReady.then(function(){
-        /* Pinterest checkout: line_items + value + currency + order_id + event_id */
-        try {
-          if (window.pintrk) window.pintrk("track", "checkout", {
-            value: Math.round(value * 100) / 100,
-            currency: currency,
-            order_id: orderId,
-            line_items: line_items,
-            event_id: event_id
-          });
-        } catch(e){window.LighomUtil&&window.LighomUtil.logErr&&window.LighomUtil.logErr("Pin Purchase v1",e);}
         try {
           fetch(WORKER, {
             method: "POST", credentials: "omit", keepalive: true,
@@ -122,7 +115,7 @@
               event_source_url: location.href, page_url: location.href, page_path: location.pathname,
               page_type: "thank_you",
               fanout: ["pinterest"],
-              utm: { source: ck("last_utm_source")||ck("first_utm_source")||"", medium: ck("last_utm_medium")||ck("first_utm_medium")||"", campaign: ck("last_utm_campaign")||ck("first_utm_campaign")||"" },
+              utm: (window.LighomUtil && window.LighomUtil.utm) ? window.LighomUtil.utm() : { source: '', medium: '', campaign: '' } /* D6 5/31 */,
               user_data: ud,
               custom_data: {
                 content_type: "product",
@@ -138,15 +131,26 @@
           });
         } catch(e){window.LighomUtil&&window.LighomUtil.logErr&&window.LighomUtil.logErr("Pin Purchase v1",e);}
         try { localStorage.setItem(KEY, String(Date.now())); } catch(e){window.LighomUtil&&window.LighomUtil.logErr&&window.LighomUtil.logErr("Pin Purchase v1",e);}
+        
       });
     }
-    var checks = 0;
-    function waitPin(){
-      if (typeof window.pintrk === "function") { actuallyFire(); return; }
-      if (++checks > 30) { actuallyFire(); return; }
-      setTimeout(waitPin, 100);
+    /* 2026-05-29: decouple server CAPI from pintrk readiness. The old waitPin gate
+       (up to 3s wait for pintrk) dropped the WHOLE fire (server fetch included) when
+       pintrk lagged or the user left the thank-you page fast, so browser Pin Purchase
+       landed on only ~7/17 orders vs Meta 15/17. Server fetch now goes immediately
+       after udReady; pintrk fires on its own retry and never blocks the server path. */
+    function firePintrk(){
+      if (typeof window.pintrk === "function") {
+        try { window.pintrk("track", "checkout", { value: Math.round(value * 100) / 100, currency: currency, order_id: orderId, line_items: line_items, event_id: event_id }); } catch(e){window.LighomUtil&&window.LighomUtil.logErr&&window.LighomUtil.logErr("Pin Purchase v1",e);}
+        return;
+      }
+      if (++pinChecks > 30) return;
+      setTimeout(firePintrk, 100);
     }
-    waitPin();
+    
+    var pinChecks = 0;
+    actuallyFire();
+    firePintrk();
     return true;
   }
 

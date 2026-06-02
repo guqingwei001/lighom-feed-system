@@ -27,7 +27,7 @@
         var it = dl[i];
         if (!it || typeof it !== "object") continue;
         if (it.event === "view_category" && Array.isArray(it.content_ids) && it.content_ids.length) {
-          return Array.from(new Set(it.content_ids.map(String))).slice(0, 30);
+          /* 5/31 VCat ID filter */ return Array.from(new Set(it.content_ids.map(String).filter(function(s){ return /^1[68]\d{22,28}$/.test(s); }))).slice(0, 30);
         }
       }
       /* 优先 2: GTM 标准 view_item_list — ecommerce.content_ids / ecommerce.items[].item_id */
@@ -37,10 +37,10 @@
         if (jt.event === "view_item_list" && jt.ecommerce) {
           var ec = jt.ecommerce;
           if (Array.isArray(ec.content_ids) && ec.content_ids.length) {
-            return Array.from(new Set(ec.content_ids.map(String))).slice(0, 30);
+            return Array.from(new Set(ec.content_ids.map(String).filter(function(s){ return /^1[68]\d{22,28}$/.test(s); }))).slice(0, 30);
           }
           if (Array.isArray(ec.items) && ec.items.length) {
-            var z = ec.items.map(function(x){ return String(x.item_id || x.id || ""); }).filter(Boolean);
+            var z = ec.items.map(function(x){ return String(x.item_id || x.id || ""); }).filter(function(s){ return /^1[68]\d{22,28}$/.test(s); });
             if (z.length) return Array.from(new Set(z)).slice(0, 30);
           }
         }
@@ -50,7 +50,7 @@
         var kt = dl[k];
         if (!kt || typeof kt !== "object") continue;
         if (kt[0] === "event" && kt[1] === "view_item_list" && kt[2] && Array.isArray(kt[2].items)) {
-          var zk = kt[2].items.map(function(x){ return String(x.item_id || x.id || ""); }).filter(Boolean);
+          var zk = kt[2].items.map(function(x){ return String(x.item_id || x.id || ""); }).filter(function(s){ return /^1[68]\d{22,28}$/.test(s); });
           if (zk.length) return Array.from(new Set(zk)).slice(0, 30);
         }
       }
@@ -64,7 +64,7 @@
   /* P0 fix 2026-05-20: getIdsFromDOM was called by fire() line 71 but never defined →
      ReferenceError when DL empty, killing the rest of fire(). Mirror FB VCat v2 implementation. */
   function getIdsFromDOM(){
-    var m = document.body.innerHTML.match(/180689\d{18,20}/g);
+    var m = document.body.innerHTML.match(/\b1[68]\d{22,28}\b/g /* 6/2 fix: was /180689\d{18,20}/ — only matched 1 of 7 Shopline 18xxx prefixes (180689/180705/180690/180726/180725/180745/180748), causing 79% bias in BQ. Now matches all 18xxx + 16xxx 24-30 digit IDs (same pattern as DL filter). */);
     if (!m) return [];
     return Array.from(new Set(m)).slice(0, 30);
   }
@@ -100,10 +100,10 @@
           event_source_url: location.href, page_url: location.href, page_path: location.pathname,
           page_type: "category",
           fanout: ["pinterest"],
-          utm: { source: ck("last_utm_source")||ck("first_utm_source")||"", medium: ck("last_utm_medium")||ck("first_utm_medium")||"", campaign: ck("last_utm_campaign")||ck("first_utm_campaign")||"" },
+          utm: (window.LighomUtil && window.LighomUtil.utm) ? window.LighomUtil.utm() : { source: '', medium: '', campaign: '' } /* D6 5/31 */,
           user_data: ud,
           custom_data: {
-            content_type: "product_group",
+            content_type: "product" /* 5/31 VCat content_type fix: was 'product_group' but content_ids are 18xxx variant IDs, must match — Meta product_group requires 16xxx item_group_id */,
             content_ids: ids,
             content_category: category,
             content_name: category,

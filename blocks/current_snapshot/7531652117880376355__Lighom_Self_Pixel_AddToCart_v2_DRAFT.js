@@ -33,24 +33,50 @@
     return vs.find(function(v){ return v.available !== false; }) || vs[0];
   }
   function getProductCategory(){
-    try { var els = document.querySelectorAll('script[type="application/ld+json"]');
-      for (var i=0;i<els.length;i++){ var d=JSON.parse(els[i].textContent||"{}");
-        var c = d && (d.category || (d["@graph"] && d["@graph"].find && (d["@graph"].find(function(x){return x.category;})||{}).category));
+    /* 5/31 fix: DOM breadcrumb 优先(真分类) → BreadcrumbList 中段 → Product.category → OG meta */
+    try {
+      var bc = document.querySelector('[class*="breadcrumb" i], nav[aria-label*="breadcrumb" i]');
+      if (bc) {
+        var txt = (bc.textContent||'').replace(/\s+/g,' ').trim();
+        var parts = txt.split(/\s*[\/>›»→]\s*/).map(function(s){return s.trim();}).filter(Boolean);
+        var prodH = ((document.querySelector("h1")||{}).textContent||'').trim();
+        var cats = parts.filter(function(p){ return p && p!=='Lighom' && p!=='Home' && p!==prodH && p.length<60; });
+        if (cats.length) return cats.join(' > ').slice(0,100);
+      }
+    } catch(e){window.LighomUtil&&window.LighomUtil.logErr&&window.LighomUtil.logErr("FB ATC v2",e);}
+    try {
+      var els = document.querySelectorAll('script[type="application/ld+json"]');
+      for (var i=0;i<els.length;i++){
+        var d = JSON.parse(els[i].textContent || "{}");
+        if (d['@type']==='BreadcrumbList' && Array.isArray(d.itemListElement) && d.itemListElement.length>=3) {
+          var mid = d.itemListElement.slice(1,-1).map(function(b){return b.name;}).filter(Boolean);
+          if (mid.length) return mid.join(' > ').slice(0,100);
+        }
+        var c = d && (d.category || (d["@graph"] && d["@graph"].find && (d["@graph"].find(function(x){return x.category;}) || {}).category));
         if (c) return String(c).slice(0,100);
       }
-    } catch(e){window.LighomUtil&&window.LighomUtil.logErr&&window.LighomUtil.logErr("FB ATC v2",e);} return "";
+    } catch(e){window.LighomUtil&&window.LighomUtil.logErr&&window.LighomUtil.logErr("FB ATC v2",e);}
+    var og = document.querySelector('meta[property="product:category"]');
+    if (og && og.content) return og.content.slice(0,100);
+    return "";
   }
   function buildVariantParams(variant){
     if (!variant) return null;
     var sku = String(variant.id || variant.sku || ""); if (!sku) return null;
     var price = Number(variant.price || 0) / 100;
     var prodName = ""; try { prodName=(document.querySelector("h1")||{}).textContent||""; } catch(e){window.LighomUtil&&window.LighomUtil.logErr&&window.LighomUtil.logErr("FB ATC v2",e);}
-    var contentName = decodeEnt(variant.product_title || variant.title || prodName).trim().slice(0,100);
+    /* 5/31 ATC upgrade: h1(产品名) 优先, append 变体限定 (跟 VC 同步) */
+    var vQual = String(variant.title||"").trim();
+    var contentName = (function(){
+      var base = prodName || variant.product_title || vQual;
+      if (prodName && vQual && !/^default title$/i.test(vQual) && prodName.indexOf(vQual)===-1) return decodeEnt(prodName + ' - ' + vQual).slice(0,100);
+      return decodeEnt(base).slice(0,100);
+    })();
     var contentCategory = getProductCategory();
     return {
       content_type: "product",
       content_ids: [sku],
-      contents: [{ id: sku, quantity: 1, item_price: Math.round(price*100)/100, title: String(variant.title||contentName).slice(0,100), brand: "Lighom", category: contentCategory }],
+      contents: [{ id: sku, quantity: 1, item_price: Math.round(price*100)/100, title: String(variant.title||contentName).slice(0,100), brand: "Lighom", item_group_id: (function(){ var og=document.querySelector('meta[property="product:item_group_id"]'); return og?og.content:""; })(), category: contentCategory }],
       content_name: contentName,
       content_category: contentCategory,
       currency: "USD",
@@ -59,7 +85,7 @@
       /* Pinterest browser tag 用 line_items;Worker pinterest.js 用 contents → 转 Pinterest CAPI;此处兼容两边 */
       line_items: [{
         product_id: sku, product_name: contentName.slice(0,100), product_category: contentCategory,
-        product_brand: "Lighom", product_quantity: 1, product_price: Math.round(price*100)/100
+        product_brand: "Lighom", item_group_id: (function(){ var og=document.querySelector('meta[property="product:item_group_id"]'); return og?og.content:""; })(), product_quantity: 1, product_price: Math.round(price*100)/100
       }]
     };
   }
@@ -92,7 +118,7 @@
           event_source_url: location.href, page_url: location.href, page_path: location.pathname,
           page_type: /\/cart/.test(location.pathname) ? "cart" : "product",
           fanout: ["meta"],  /* Pinterest 阶段后加 */
-          utm: { source: ck("last_utm_source")||ck("first_utm_source")||"", medium: ck("last_utm_medium")||ck("first_utm_medium")||"", campaign: ck("last_utm_campaign")||ck("first_utm_campaign")||"" },
+          utm: (window.LighomUtil && window.LighomUtil.utm) ? window.LighomUtil.utm() : { source: '', medium: '', campaign: '' } /* D6 5/31 */,
           user_data: ud,
           custom_data: Object.assign({}, params, { data_quality: "self_pixel_v2:atc:" + reason })
         })

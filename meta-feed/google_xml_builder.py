@@ -23,22 +23,15 @@ def _cdata(s: str) -> str:
 
 
 def _retarget_link(meta_link: str) -> str:
-    """Rewrite Meta-flavored link → Google Shopping with `{ifmobile}` macro support
-    and Google-specific UTMs.
-    Google supports {keyword}, {creative}, {adgroupid} etc., but for simple DPA
-    we just stamp source=google_shopping.
-    """
+    """Clean Google Shopping URL. No ValueTrack macros ({campaignid}/{creative}):
+    GMC disallows them in link/mobile_link, and they don't populate from Shopping
+    feeds anyway. Click-level tracking belongs in the Ads tracking template."""
     base = meta_link.split('?', 1)[0]
     m = re.search(r'sku=([^&]+)', meta_link)
     sku = m.group(1) if m else ''
     qs = (
-        f'sku={sku}'
-        '&utm_source=google_shopping'
-        '&utm_medium=cpc'
-        '&utm_campaign={_campaign}'
-        '&utm_content={creative}'
-    ).replace('{_campaign}', '{campaignid}') if sku else (
-        'utm_source=google_shopping&utm_medium=cpc&utm_campaign={campaignid}'
+        f'sku={sku}&utm_source=google_shopping&utm_medium=cpc' if sku
+        else 'utm_source=google_shopping&utm_medium=cpc'
     )
     return f'{base}?{qs}'
 

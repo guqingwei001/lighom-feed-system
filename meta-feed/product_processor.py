@@ -11,7 +11,7 @@ import xml.etree.ElementTree as ET
 from description_parser import (
     parse_spec_table, spec_pick, parse_tags, variant_option,
     attach_resize, pick_lifestyle_image, extract_highlights,
-    build_product_detail, short_description, clean_title, repair_mojibake,
+    build_product_detail, short_description, clean_title,
     norm_color, fmt_weight, parse_weight_to_kg,
 )
 from gpc_map import gpc as _legacy_gpc  # kept for back-compat, not used now
@@ -32,13 +32,8 @@ def _link(handle: str, vid: str) -> str:
     )
 
 
-def process_product(product: dict, custom_cat: str = '', perf: dict | None = None) -> list[dict]:
-    """Return list of standardized variant items (zero or more).
-
-    perf = {'sold': set(variant_id), 'signal': set(variant_id)} from BQ (90d).
-    Rolled up to SPU: if ANY kept variant has signal, the whole product is
-    labeled seller/warm; else cold. None/empty → cl2 keeps sale/regular.
-    """
+def process_product(product: dict, custom_cat: str = '') -> list[dict]:
+    """Return list of standardized variant items (zero or more)."""
     if not product:
         return []
     if (product.get('status') or '').lower() != 'active':
@@ -81,8 +76,8 @@ def process_product(product: dict, custom_cat: str = '', perf: dict | None = Non
                           if o.get('name') and o['name'].strip().lower() not in STANDARD_OPTS]
 
     title_p = (product.get('title') or '').strip()
-    body = repair_mojibake(product.get('body_html') or '')
-    description = short_description(body, 4900)
+    body = product.get('body_html') or ''
+    description = short_description(body, 800)
     rich_desc = body
     brand = (product.get('vendor') or 'Lighom').strip() or 'Lighom'
 
@@ -108,20 +103,6 @@ def process_product(product: dict, custom_cat: str = '', perf: dict | None = Non
     lifestyle_img = pick_lifestyle_image(images)
     lifestyle_link = attach_resize(lifestyle_img) if lifestyle_img else ''
     highlights = extract_highlights(body, spec, spec_color, spec_material, n=4)
-
-    # SPU-level performance tier (BQ 90d, rolled up across kept variants).
-    # cl2 carries it when perf data is present; else falls back to sale/regular
-    # (sale status is also derivable from the sale_price field, so cl2 is the
-    # least-lossy slot to repurpose given Meta's 5-custom_label cap).
-    perf_label = None
-    if perf and perf.get('signal'):
-        kept_ids = {str(v.get('id') or '') for v in kept}
-        if kept_ids & perf.get('sold', set()):
-            perf_label = 'seller'
-        elif kept_ids & perf['signal']:
-            perf_label = 'warm'
-        else:
-            perf_label = 'cold'
 
     items = []
     for v in kept:
@@ -185,12 +166,9 @@ def process_product(product: dict, custom_cat: str = '', perf: dict | None = Non
         bc = (v.get('barcode') or '').strip()
         gtin = bc if bc.isdigit() and len(bc) in (8,12,13,14) else ''
 
-        # Shopline often returns an unset variant weight as "0"/"0.00" (truthy string) or a
-        # tiny gram value that renders to "0.000 kg" — not a real weight. Render first and
-        # keep it only if non-zero; otherwise fall back to the spec-table weight.
-        vw_fmt = fmt_weight(v.get('weight'), v.get('weight_unit'))
-        if vw_fmt and not re.fullmatch(r'0\.0+ kg', vw_fmt):
-            ship_w = vw_fmt
+        vw = v.get('weight')
+        if vw not in (None, '', 0):
+            ship_w = fmt_weight(vw, v.get('weight_unit'))
         elif spec_weight_kg:
             ship_w = f'{spec_weight_kg:.2f} kg'
         else:
@@ -198,7 +176,7 @@ def process_product(product: dict, custom_cat: str = '', perf: dict | None = Non
 
         custom_labels = [
             cl0, cl1,
-            perf_label if perf_label else ('sale' if sale_field else 'regular'),
+            'sale' if sale_field else 'regular',
             'high' if price >= 500 else 'mid' if price >= 200 else 'low',
             ','.join(t for t in tag_attrs.get('room', [])[:3]),
         ]
@@ -249,13 +227,12 @@ def process_product(product: dict, custom_cat: str = '', perf: dict | None = Non
     return items
 
 
-def process_products(products: list[dict], cat_map: dict | None = None,
-                     perf: dict | None = None) -> list[dict]:
+def process_products(products: list[dict], cat_map: dict | None = None) -> list[dict]:
     cat_map = cat_map or {}
     out = []
     for p in products:
         sid = str(p.get('id', ''))
-        out.extend(process_product(p, cat_map.get(sid, ''), perf))
+        out.extend(process_product(p, cat_map.get(sid, '')))
     return out
 
 

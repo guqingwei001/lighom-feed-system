@@ -72,8 +72,8 @@ def build_pinterest_xml(items: list[dict], *, store_url: str = 'https://lighom.c
         if it.get('sale_price'):
             out.append(f'      <g:sale_price>{it["sale_price"]}</g:sale_price>\n')
         out.append(f'      <g:brand>{escape(it["brand"])}</g:brand>\n')
-        # P0: identifier_exists=no — Lighom branded products without GTIN
-        out.append(f'      <g:identifier_exists>no</g:identifier_exists>\n')
+        # identifier_exists: yes when the variant has a GTIN, else no
+        out.append(f'      <g:identifier_exists>{it.get("identifier_exists","no")}</g:identifier_exists>\n')
         if it.get('mpn'):
             out.append(f'      <g:mpn>{escape(it["mpn"])}</g:mpn>\n')
         if it.get('gtin'):

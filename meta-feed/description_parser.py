@@ -384,8 +384,23 @@ def build_product_detail(spec: dict, custom_cat: str, color: str, material: str)
             light_label = 'LED'
         details.append((SECTION, 'Light Source Type', light_label))
 
-        for k in ('lamp shade material', 'shade material', 'lamp material',
-                  'primary fixture material', 'fixture material',
+        # GMC "key details customers look for" for lighting: Number of Lights,
+        # Shade Material, Finish (split shade out of the generic Lamp Material below).
+        v = spec_pick(spec, 'number of lights', 'number of bulbs', 'number of heads',
+                       'light count', 'no. of lights', 'no of lights')
+        m = re.search(r'\d+', v or '')
+        if m:
+            details.append((SECTION, 'Number of Lights', m.group(0)))
+
+        v = spec_pick(spec, 'lamp shade material', 'shade material')
+        if v:
+            details.append((SECTION, 'Shade Material', v.strip()[:200]))
+
+        v = spec_pick(spec, 'finish', 'surface finish', 'frame finish')
+        if v:
+            details.append((SECTION, 'Finish', v.strip()[:200]))
+
+        for k in ('lamp material', 'primary fixture material', 'fixture material',
                   'frame material', 'body material', 'main material'):
             v = spec_pick(spec, k)
             if v:

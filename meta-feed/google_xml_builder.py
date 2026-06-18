@@ -143,6 +143,8 @@ def build_google_xml(items: list[dict], *, store_url: str = 'https://lighom.com'
             if v:
                 if fld == 'color':
                     v = _cap_color(_safe(v))
+                elif fld == 'size':
+                    v = v.split(',')[0].strip()[:100]  # GMC 'too many values: [size]'
                 out.append(f'      <g:{fld}>{_cdata(v)}</g:{fld}>\n')
 
         out.append(f'      <g:age_group>{it.get("age_group","adult")}</g:age_group>\n')

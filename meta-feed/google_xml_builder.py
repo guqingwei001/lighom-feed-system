@@ -61,6 +61,23 @@ def _safe(s: str) -> str:
     return s
 
 
+def _trunc_title(s: str, limit: int = 150) -> str:
+    """Google caps g:title at 150 chars (over → 'value truncated'). Collapse
+    whitespace (kills stray newlines), then cut at a word/comma boundary so the
+    leading product name survives — trailing CCT/variant cruft is redundant with
+    g:color anyway."""
+    if not s:
+        return s
+    s = re.sub(r'\s+', ' ', s).strip()
+    if len(s) <= limit:
+        return s
+    cut = s[:limit]
+    brk = max(cut.rfind(' '), cut.rfind(','))
+    if brk >= limit * 0.6:
+        cut = cut[:brk]
+    return cut.rstrip(' ,-')
+
+
 def build_google_xml(items: list[dict], *, store_url: str = 'https://lighom.com') -> str:
     out = []
     out.append('<?xml version="1.0" encoding="UTF-8"?>\n')
@@ -74,7 +91,7 @@ def build_google_xml(items: list[dict], *, store_url: str = 'https://lighom.com'
         out.append('    <item>\n')
         out.append(f'      <g:id>{escape(it["id"])}</g:id>\n')
         out.append(f'      <g:item_group_id>{escape(it["item_group_id"])}</g:item_group_id>\n')
-        out.append(f'      <g:title>{_cdata(_safe(it["title"]))}</g:title>\n')
+        out.append(f'      <g:title>{_cdata(_safe(_trunc_title(it["title"])))}</g:title>\n')
         out.append(f'      <g:description>{_cdata(_safe(it["description"]))}</g:description>\n')
 
         link = _retarget_link(it["link"])

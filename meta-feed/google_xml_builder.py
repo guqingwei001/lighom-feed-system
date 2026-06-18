@@ -78,6 +78,21 @@ def _trunc_title(s: str, limit: int = 150) -> str:
     return cut.rstrip(' ,-')
 
 
+def _cap_color(s: str, limit: int = 100) -> str:
+    """Google g:color: max 3 values (slash-separated) and 100 chars. Lighting
+    'colors' here are long CCT/dimming strings (comma+slash) that trip
+    'too many values' / 'too long'. Keep the first comma-clause and its first
+    3 slash-segments, capped at 100 chars."""
+    if not s:
+        return s
+    s = re.sub(r'\s+', ' ', s).strip()
+    first = s.split(',')[0].strip()
+    segs = first.split('/')
+    if len(segs) > 3:
+        first = '/'.join(segs[:3])
+    return first[:limit].rstrip(' ,-/')
+
+
 def build_google_xml(items: list[dict], *, store_url: str = 'https://lighom.com') -> str:
     out = []
     out.append('<?xml version="1.0" encoding="UTF-8"?>\n')
@@ -127,7 +142,7 @@ def build_google_xml(items: list[dict], *, store_url: str = 'https://lighom.com'
             v = it.get(fld)
             if v:
                 if fld == 'color':
-                    v = _safe(v)
+                    v = _cap_color(_safe(v))
                 out.append(f'      <g:{fld}>{_cdata(v)}</g:{fld}>\n')
 
         out.append(f'      <g:age_group>{it.get("age_group","adult")}</g:age_group>\n')

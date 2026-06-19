@@ -103,6 +103,11 @@ def build_google_xml(items: list[dict], *, store_url: str = 'https://lighom.com'
     out.append('    <description>Lighom product feed for Google Merchant Center</description>\n')
 
     for it in items:
+        # Google feed only: drop GTIN-less SKUs (the over-capacity, never-sold long
+        # tail). Focuses GMC/Shopping on identifier-backed products; Meta/Pinterest
+        # feeds keep the full catalog. Reversible: assign more GS1 numbers → returns.
+        if not (it.get('gtin') or '').strip():
+            continue
         out.append('    <item>\n')
         out.append(f'      <g:id>{escape(it["id"])}</g:id>\n')
         out.append(f'      <g:item_group_id>{escape(it["item_group_id"])}</g:item_group_id>\n')

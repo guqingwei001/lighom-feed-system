@@ -20,8 +20,11 @@ LOCAL_SMART_FEED = '/tmp/smart-feed.xml'
 SMART_FEED_URL = 'http://public.myshopline.com/prod/file/facebook/feed/lighom_50345.xml'
 R2_KEY = 'google-feed.xml'
 
-# Refuse upload if new variant count drops > 10% vs previous publish.
-MIN_FRACTION_VS_LAST = 0.90
+# Refuse upload if new variant count drops > 15% vs previous publish.
+# (Relaxed from 10%: the one-time GTIN-only step-down drops the ~11% GTIN-less
+# long tail, taking the google feed 104k->93k = 89.3% — an intentional cut, not
+# truncation. 15% still catches real truncation / Shopline-fetch failures.)
+MIN_FRACTION_VS_LAST = 0.85
 
 # Reject feed if Shopline API success rate < this fraction — defends against
 # silent SPU drop (5/13 incident: ~2% SPUs lost to transient API errors).
